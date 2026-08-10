@@ -1,0 +1,873 @@
+const API_URL =
+  'https://script.google.com/macros/s/AKfycbzKMV9Vy3fq2UQlT8Z5Ll67gsEieLE1EhrFQ13hnENcNzp2FOX-2lBv402tSvivKeriOg/exec';
+
+const CUSTOM_TEAM_ICONS = Object.freeze({
+  1: 'assets/teams/main-event-dante.png',
+  2: 'assets/teams/iambad2.png',
+  3: 'assets/teams/brittanys-brilliant-team.png',
+  4: 'assets/teams/cheetahs-and-cleats.png',
+  5: 'assets/teams/baby-back-gibbs.png',
+  6: 'assets/teams/devins-dawg-pound.png',
+  7: 'assets/teams/caleb-days-dynasty.png',
+  8: 'assets/teams/here-comes-the-boom.png',
+  9: 'assets/teams/go-birds.png',
+  10: 'assets/teams/canadian-football-league.png',
+  11: 'assets/teams/740-bad-dads-club.png',
+  12: 'assets/teams/jeremys-scary-team.png'
+});
+
+/*
+ * Manual storylines.
+ *
+ * Key format:
+ *   "week:lowerTeamId-higherTeamId"
+ *
+ * This is intentionally manual so "Match of the Week" means something.
+ * Add future rivalries, rematches, playoff revenge games, etc. here.
+ */
+
+const LOADER_MINIMUM_MS = 1600;
+const loaderState = {
+  startedAt: Date.now(),
+  progress: 0,
+  target: 8,
+  timer: null,
+  stages: [
+    { at: 8,  text: 'Initializing Zenni League', message: 'Preparing the championship stage...' },
+    { at: 24, text: 'Connecting to ESPN', message: 'Connecting to ESPN Fantasy...' },
+    { at: 44, text: 'Loading teams', message: 'Loading all 12 teams...' },
+    { at: 62, text: 'Syncing matchups', message: 'Syncing weekly matchups...' },
+    { at: 78, text: 'Preparing Battle Center', message: 'Preparing the Battle Center...' },
+    { at: 90, text: 'Finalizing league', message: 'The road to the championship is ready...' }
+  ]
+};
+
+const MATCHUP_STORYLINES = Object.freeze({
+  '1:1-6': {
+    featured: true,
+    eyebrow: '2025 Zenni Cup Championship Rematch',
+    title: 'THE REMATCH',
+    subtitle: 'Main Event Dante vs Devin’s Dawg Pound',
+    reason: 'The 2026 season opens with a rematch of last year’s championship matchup. Dante enters as the defending champion; Devin gets the first shot at revenge.',
+    tag: 'Championship Rematch'
+  }
+});
+
+const state = {
+  league: null,
+  teams: [],
+  teamMap: new Map(),
+  standings: [],
+  currentMatchups: [],
+  selectedWeek: 1,
+  weekCache: new Map(),
+  activeView: 'overview'
+};
+
+document.addEventListener('DOMContentLoaded', init);
+
+async function init() {
+  bindUi();
+  startLeagueLoader();
+
+  try {
+    setLoaderTarget(22);
+    const data = await jsonp('league');
+
+    if (!data || !data.ok) {
+      throw new Error(data && data.error ? data.error : 'League API did not return data.');
+    }
+
+    setLoaderTarget(58);
+    hydrateState(data);
+
+    setLoaderTarget(78);
+    renderAll();
+
+    setLoaderTarget(94);
+    setApiStatus(true, 'ESPN Connected');
+
+    await finishLeagueLoader(true);
+  } catch (error) {
+    console.error(error);
+    setApiStatus(false, 'API Error');
+    renderFatalError(error);
+    await finishLeagueLoader(false);
+  }
+}
+
+
+function startLeagueLoader() {
+  const loader = document.getElementById('leagueLoader');
+  if (!loader) return;
+
+  document.body.classList.add('is-loading');
+
+  updateLoaderUi(4);
+  loaderState.target = 16;
+
+  loaderState.timer = window.setInterval(() => {
+    if (loaderState.progress >= loaderState.target) return;
+
+    const remaining = loaderState.target - loaderState.progress;
+    const step = Math.max(.35, Math.min(1.8, remaining * .08));
+    updateLoaderUi(Math.min(loaderState.target, loaderState.progress + step));
+  }, 55);
+}
+
+function setLoaderTarget(value) {
+  loaderState.target = Math.max(loaderState.target, Math.min(96, Number(value) || 0));
+}
+
+function updateLoaderUi(value) {
+  loaderState.progress = Math.max(0, Math.min(100, value));
+
+  const percent = document.getElementById('loaderPercent');
+  const bar = document.getElementById('loaderProgressBar');
+  const stage = document.getElementById('loaderStage');
+  const message = document.getElementById('loaderMessage');
+
+  if (percent) percent.textContent = `${Math.round(loaderState.progress)}%`;
+  if (bar) bar.style.width = `${loaderState.progress}%`;
+
+  const currentStage = loaderState.stages
+    .slice()
+    .reverse()
+    .find(item => loaderState.progress >= item.at);
+
+  if (currentStage) {
+    if (stage) stage.textContent = currentStage.text;
+    if (message) message.textContent = currentStage.message;
+  }
+}
+
+async function finishLeagueLoader(success) {
+  const loader = document.getElementById('leagueLoader');
+  if (!loader) return;
+
+  if (loaderState.timer) {
+    window.clearInterval(loaderState.timer);
+    loaderState.timer = null;
+  }
+
+  const headline = document.getElementById('loaderHeadline');
+  const message = document.getElementById('loaderMessage');
+  const stage = document.getElementById('loaderStage');
+
+  if (success) {
+    if (headline) headline.textContent = 'WELCOME TO ZENNI LEAGUE';
+    if (message) message.textContent = 'The championship race begins now.';
+    if (stage) stage.textContent = 'Ready';
+  } else {
+    if (headline) headline.textContent = 'ZENNI LEAGUE';
+    if (message) message.textContent = 'ESPN connection issue — opening the league shell.';
+    if (stage) stage.textContent = 'Limited data mode';
+  }
+
+  loaderState.target = 100;
+
+  while (loaderState.progress < 100) {
+    updateLoaderUi(Math.min(100, loaderState.progress + 3.4));
+    await wait(18);
+  }
+
+  const elapsed = Date.now() - loaderState.startedAt;
+  if (elapsed < LOADER_MINIMUM_MS) {
+    await wait(LOADER_MINIMUM_MS - elapsed);
+  }
+
+  loader.classList.add(success ? 'is-ready' : 'is-error');
+
+  await wait(420);
+
+  loader.classList.add('is-hidden');
+  document.body.classList.remove('is-loading');
+
+  window.setTimeout(() => {
+    loader.remove();
+  }, 900);
+}
+
+function wait(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+function bindUi() {
+  document.querySelectorAll('[data-tab]').forEach(button => {
+    button.addEventListener('click', () => switchView(button.dataset.tab));
+  });
+
+  document.querySelectorAll('[data-tab-open]').forEach(button => {
+    button.addEventListener('click', () => switchView(button.dataset.tabOpen));
+  });
+
+  document.querySelectorAll('[data-tab-target]').forEach(link => {
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      switchView(link.dataset.tabTarget);
+    });
+  });
+
+  document.getElementById('prevWeek').addEventListener('click', () => changeWeek(-1));
+  document.getElementById('nextWeek').addEventListener('click', () => changeWeek(1));
+  document.getElementById('battlePrevWeek').addEventListener('click', () => changeWeek(-1));
+  document.getElementById('battleNextWeek').addEventListener('click', () => changeWeek(1));
+
+  const modal = document.getElementById('teamModal');
+  document.getElementById('modalClose').addEventListener('click', () => modal.close());
+
+  modal.addEventListener('click', event => {
+    if (event.target === modal) modal.close();
+  });
+}
+
+function switchView(view) {
+  const nextView = ['overview', 'battle', 'standings', 'teams'].includes(view)
+    ? view
+    : 'overview';
+
+  state.activeView = nextView;
+
+  document.querySelectorAll('.view-panel').forEach(panel => {
+    panel.classList.toggle('is-active', panel.dataset.view === nextView);
+  });
+
+  document.querySelectorAll('[data-tab]').forEach(button => {
+    const active = button.dataset.tab === nextView;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-current', active ? 'page' : 'false');
+  });
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  if (nextView === 'battle') {
+    animateBattleEntrance();
+  }
+}
+
+function hydrateState(data) {
+  state.league = data.league;
+  state.teams = Array.isArray(data.teams) ? data.teams : [];
+  state.teamMap = new Map(state.teams.map(team => [Number(team.id), team]));
+  state.standings = Array.isArray(data.standings) ? data.standings : [];
+  state.currentMatchups = Array.isArray(data.currentMatchups) ? data.currentMatchups : [];
+  state.selectedWeek = Number(data.league.currentWeek || 1);
+  state.weekCache.set(state.selectedWeek, state.currentMatchups);
+
+  document.getElementById('heroWeek').textContent = state.league.currentWeek;
+  document.getElementById('heroTeams').textContent = state.league.teamCount;
+  document.getElementById('heroPlayoffs').textContent = state.league.playoffTeams;
+
+  const generated = data.generatedAt ? new Date(data.generatedAt) : new Date();
+  document.getElementById('lastUpdated').textContent =
+    `Last ESPN sync: ${generated.toLocaleString()}`;
+
+  const preseason = Number(state.league.latestScoringPeriod || 0) < 1;
+  document.getElementById('standingsNote').textContent = preseason
+    ? 'Preseason — rankings begin after Week 1'
+    : `Through Week ${state.league.latestScoringPeriod}`;
+
+  document.getElementById('heroSubtext').textContent = preseason
+    ? 'The field is set. Twelve teams. One Zenni Cup.'
+    : `Live through Week ${state.league.latestScoringPeriod}.`;
+}
+
+function renderAll() {
+  renderChampion();
+  renderLeaguePulse();
+  renderStandings();
+  renderTeamGallery();
+  renderWeek(state.currentMatchups, state.selectedWeek);
+}
+
+function renderWeek(matchups, week) {
+  state.selectedWeek = Number(week);
+  syncWeekLabels(week);
+  renderMatchupGrid(matchups, week);
+  renderFeaturedMatchup(matchups, week);
+  renderBattleCenter(matchups, week);
+}
+
+function syncWeekLabels(week) {
+  document.getElementById('featuredWeek').textContent = `Week ${week}`;
+  document.getElementById('matchupWeekLabel').textContent = `Week ${week}`;
+  document.getElementById('battleWeekLabel').textContent = `Week ${week}`;
+  document.getElementById('battleCardWeek').textContent = week;
+}
+
+function renderChampion() {
+  const champion = state.teams.find(team => team.defendingChampion);
+
+  if (!champion) return;
+
+  document.getElementById('championName').textContent = champion.name;
+  document.getElementById('championOwner').textContent =
+    `${ownerText(champion)} • 2025 Zenni League Champion`;
+
+  const badge = document.querySelector('.champion-badge span');
+  badge.textContent = `${champion.championships || 1}×`;
+}
+
+function renderFeaturedMatchup(matchups, week) {
+  const container = document.getElementById('featuredMatchup');
+
+  if (!matchups.length) {
+    container.innerHTML = '<div class="error-panel">No matchup data is available for this week yet.</div>';
+    return;
+  }
+
+  const featured = chooseFeaturedMatchup(matchups, week);
+  const home = state.teamMap.get(Number(featured.homeTeamId));
+  const away = state.teamMap.get(Number(featured.awayTeamId));
+  const story = getMatchupStory(featured, week);
+
+  document.getElementById('featuredStoryTitle').textContent =
+    story.featured ? story.title : 'Game of the Week';
+
+  document.getElementById('featuredStorySubtitle').textContent =
+    story.featured ? story.eyebrow : story.tag;
+
+  document.getElementById('featuredStoryReason').innerHTML = `
+    <span>Why it matters</span>
+    <p>${escapeHtml(story.reason)}</p>
+  `;
+
+  container.innerHTML = `
+    ${featuredTeamMarkup(home, featured.homeScore, 'left')}
+    <div class="vs-mark">VS</div>
+    ${featuredTeamMarkup(away, featured.awayScore, 'right')}
+  `;
+}
+
+function chooseFeaturedMatchup(matchups, week) {
+  const explicit = matchups.find(match => getMatchupStory(match, week).featured);
+  if (explicit) return explicit;
+
+  const champion = state.teams.find(team => team.defendingChampion);
+
+  if (champion) {
+    const championMatch = matchups.find(match =>
+      Number(match.homeTeamId) === Number(champion.id) ||
+      Number(match.awayTeamId) === Number(champion.id)
+    );
+
+    if (championMatch) return championMatch;
+  }
+
+  return matchups
+    .slice()
+    .sort((a, b) =>
+      (Number(b.homeScore) + Number(b.awayScore)) -
+      (Number(a.homeScore) + Number(a.awayScore))
+    )[0];
+}
+
+function featuredTeamMarkup(team, score, side) {
+  if (!team) return '<div class="featured-team"><h3>Unknown Team</h3></div>';
+
+  return `
+    <div class="featured-team featured-team-${side}">
+      <img class="featured-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team.name)} mascot" ${teamIconFallbackAttr(team)}>
+      <h3>${escapeHtml(team.name)}</h3>
+      <p>${escapeHtml(ownerText(team))}</p>
+      <div class="featured-score">${number2(score)}</div>
+    </div>
+  `;
+}
+
+function renderLeaguePulse() {
+  const container = document.getElementById('leaguePulse');
+  const preseason = Number(state.league.latestScoringPeriod || 0) < 1;
+
+  const champion = state.teams.find(team => team.defendingChampion);
+  const afc = state.teams.filter(team => Number(team.divisionId) === 0).length;
+  const nfc = state.teams.filter(team => Number(team.divisionId) === 1).length;
+
+  const items = preseason
+    ? [
+        ['👑 Champion Watch', `${champion ? champion.name : 'The champion'} begins the title defense in Week ${state.league.currentWeek}.`],
+        ['⚔️ Conference Balance', `${afc} AFC teams and ${nfc} NFC teams are chasing ${state.league.playoffTeams} playoff spots.`],
+        ['🏈 Season Format', `${state.league.regularSeasonWeeks} regular-season weeks before the Zenni Cup playoff run.`],
+        ['🔥 Opening Card', `${state.currentMatchups.length} Week 1 battles are locked in.`]
+      ]
+    : buildLivePulse();
+
+  container.innerHTML = items.map(([title, detail]) => `
+    <div class="pulse-item">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(detail)}</span>
+    </div>
+  `).join('');
+}
+
+function buildLivePulse() {
+  const sortedByPF = state.teams.slice().sort((a, b) => Number(b.pointsFor) - Number(a.pointsFor));
+  const hottest = state.teams.slice().sort((a, b) => Number(b.streakLength) - Number(a.streakLength))[0];
+  const leader = state.standings.find(row => row.overallRank === 1) || sortedByPF[0];
+
+  return [
+    ['🔥 League Leader', leader ? `${leader.teamName || leader.name} currently sits on top.` : 'Standings are updating.'],
+    ['💥 Scoring Leader', sortedByPF[0] ? `${sortedByPF[0].name} leads with ${number2(sortedByPF[0].pointsFor)} PF.` : 'Scoring data pending.'],
+    ['📈 Hot Streak', hottest && hottest.streakLength ? `${hottest.name}: ${hottest.streakType} ${hottest.streakLength}.` : 'No active streak has separated from the pack yet.'],
+    ['🏆 Playoff Race', `${state.league.playoffTeams} of ${state.league.teamCount} teams will make the postseason.`]
+  ];
+}
+
+async function changeWeek(delta) {
+  const min = 1;
+  const max = Number(state.league.regularSeasonWeeks || 14);
+  const next = Math.min(max, Math.max(min, state.selectedWeek + delta));
+
+  if (next === state.selectedWeek) return;
+
+  setWeekLoading(next);
+
+  try {
+    const matchups = await getWeekMatchups(next);
+    renderWeek(matchups, next);
+  } catch (error) {
+    renderWeekError(error, next);
+  }
+}
+
+async function getWeekMatchups(week) {
+  if (state.weekCache.has(Number(week))) {
+    return state.weekCache.get(Number(week));
+  }
+
+  const data = await jsonp('matchups', { week });
+  const matchups = Array.isArray(data.matchups) ? data.matchups : [];
+  state.weekCache.set(Number(week), matchups);
+  return matchups;
+}
+
+function setWeekLoading(week) {
+  syncWeekLabels(week);
+  document.getElementById('matchupGrid').innerHTML = '<div class="skeleton-block"></div>';
+  document.getElementById('battleGrid').innerHTML = '<div class="skeleton-block"></div>';
+  document.getElementById('battleFeatured').innerHTML = '<div class="arena-loading skeleton-block"></div>';
+}
+
+function renderWeekError(error, week) {
+  const message = escapeHtml(error.message || String(error));
+  document.getElementById('matchupGrid').innerHTML = `<div class="error-panel">${message}</div>`;
+  document.getElementById('battleGrid').innerHTML = `<div class="error-panel">${message}</div>`;
+  document.getElementById('battleFeatured').innerHTML = `<div class="error-panel">${message}</div>`;
+  syncWeekLabels(week);
+}
+
+function renderMatchupGrid(matchups, week) {
+  const grid = document.getElementById('matchupGrid');
+
+  if (!matchups.length) {
+    grid.innerHTML = '<div class="error-panel">No matchups returned for this week.</div>';
+    return;
+  }
+
+  grid.innerHTML = matchups.map(match => {
+    const home = state.teamMap.get(Number(match.homeTeamId));
+    const away = state.teamMap.get(Number(match.awayTeamId));
+    const story = getMatchupStory(match, week);
+
+    return `
+      <article class="matchup-card">
+        ${matchupRowMarkup(home, match.homeScore)}
+        ${matchupRowMarkup(away, match.awayScore)}
+        <div class="matchup-footer">
+          <span>${escapeHtml(story.tag)}</span>
+          <span>${escapeHtml(match.status || 'Scheduled')}</span>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+function matchupRowMarkup(team, score) {
+  return `
+    <div class="matchup-row">
+      <img class="matchup-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
+      <div>
+        <div class="matchup-team-name">${escapeHtml(team ? team.name : 'Unknown Team')}</div>
+        <div class="matchup-owner">${escapeHtml(team ? ownerText(team) : '')}</div>
+      </div>
+      <div class="matchup-score">${number2(score)}</div>
+    </div>
+  `;
+}
+
+function renderBattleCenter(matchups, week) {
+  const featuredContainer = document.getElementById('battleFeatured');
+  const grid = document.getElementById('battleGrid');
+
+  document.getElementById('battleCount').textContent =
+    `${matchups.length} ${matchups.length === 1 ? 'battle' : 'battles'}`;
+
+  if (!matchups.length) {
+    featuredContainer.innerHTML = '<div class="error-panel">No battle card is available for this week.</div>';
+    grid.innerHTML = '';
+    return;
+  }
+
+  const featured = chooseFeaturedMatchup(matchups, week);
+  const others = matchups.filter(match => match !== featured);
+  const featuredStory = getMatchupStory(featured, week);
+
+  featuredContainer.innerHTML = battleFeaturedMarkup(featured, featuredStory, week);
+  grid.innerHTML = others.map((match, index) =>
+    battleCardMarkup(match, getMatchupStory(match, week), index)
+  ).join('');
+
+  requestAnimationFrame(animateBattleEntrance);
+}
+
+function battleFeaturedMarkup(match, story, week) {
+  const home = state.teamMap.get(Number(match.homeTeamId));
+  const away = state.teamMap.get(Number(match.awayTeamId));
+
+  return `
+    <div class="motw-stage">
+      <div class="motw-topline">
+        <span class="motw-label">MATCH OF THE WEEK</span>
+        <span class="motw-week">WEEK ${week}</span>
+      </div>
+
+      <div class="motw-story">
+        <span>${escapeHtml(story.eyebrow)}</span>
+        <h2>${escapeHtml(story.title)}</h2>
+        <p>${escapeHtml(story.reason)}</p>
+      </div>
+
+      <div class="motw-fight">
+        ${battleFighterMarkup(home, match.homeScore, 'left')}
+        <div class="battle-impact" aria-hidden="true">
+          <span class="impact-ring"></span>
+          <strong>VS</strong>
+          <small>${escapeHtml(story.tag)}</small>
+        </div>
+        ${battleFighterMarkup(away, match.awayScore, 'right')}
+      </div>
+    </div>
+  `;
+}
+
+function battleCardMarkup(match, story, index) {
+  const home = state.teamMap.get(Number(match.homeTeamId));
+  const away = state.teamMap.get(Number(match.awayTeamId));
+
+  return `
+    <article class="battle-card" style="--battle-delay:${index * 90}ms">
+      <div class="battle-card-tag">${escapeHtml(story.tag)}</div>
+
+      <div class="battle-card-fighters">
+        ${battleMiniFighterMarkup(home, match.homeScore, 'left')}
+        <div class="battle-mini-vs">VS</div>
+        ${battleMiniFighterMarkup(away, match.awayScore, 'right')}
+      </div>
+
+      <div class="battle-card-story">
+        <strong>${escapeHtml(story.title)}</strong>
+        <span>${escapeHtml(story.reason)}</span>
+      </div>
+
+      <div class="battle-status">
+        <span>Week ${match.week || state.selectedWeek}</span>
+        <span>${escapeHtml(match.status || 'Scheduled')}</span>
+      </div>
+    </article>
+  `;
+}
+
+function battleFighterMarkup(team, score, side) {
+  if (!team) return '<div class="battle-fighter"></div>';
+
+  return `
+    <div class="battle-fighter battle-fighter-${side} ${team.defendingChampion ? 'is-champion' : ''}">
+      <div class="fighter-aura"></div>
+      <img class="battle-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team.name)} mascot" ${teamIconFallbackAttr(team)}>
+      ${team.defendingChampion ? '<span class="fighter-champion">DEFENDING CHAMPION</span>' : ''}
+      <h3>${escapeHtml(team.name)}</h3>
+      <p>${escapeHtml(ownerText(team))}</p>
+      <div class="fighter-score">${number2(score)}</div>
+    </div>
+  `;
+}
+
+function battleMiniFighterMarkup(team, score, side) {
+  if (!team) return '<div class="battle-mini-team"></div>';
+
+  return `
+    <div class="battle-mini-team battle-mini-${side}">
+      <img class="battle-mini-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team.name)} mascot" ${teamIconFallbackAttr(team)}>
+      <strong>${escapeHtml(team.name)}</strong>
+      <span>${number2(score)}</span>
+    </div>
+  `;
+}
+
+function getMatchupStory(match, week) {
+  const key = storylineKey(week, match.homeTeamId, match.awayTeamId);
+  const manual = MATCHUP_STORYLINES[key];
+
+  if (manual) return manual;
+
+  const home = state.teamMap.get(Number(match.homeTeamId));
+  const away = state.teamMap.get(Number(match.awayTeamId));
+
+  return buildDefaultStory(home, away, week);
+}
+
+function buildDefaultStory(home, away, week) {
+  const homeDivision = Number(home && home.divisionId);
+  const awayDivision = Number(away && away.divisionId);
+  const sameConference = Number.isFinite(homeDivision) &&
+    Number.isFinite(awayDivision) &&
+    homeDivision === awayDivision;
+
+  const tag = sameConference ? 'Conference Clash' : 'Cross-Conference Battle';
+  const title = `${home ? home.name : 'Team'} vs ${away ? away.name : 'Team'}`;
+  const reason = sameConference
+    ? `A Week ${week} conference matchup with direct bragging rights inside the ${home && home.division ? home.division : 'division'} race.`
+    : `A Week ${week} cross-conference face-off with both teams trying to build momentum toward the Zenni Cup race.`;
+
+  return {
+    featured: false,
+    eyebrow: `Week ${week} Battle`,
+    title,
+    subtitle: title,
+    reason,
+    tag
+  };
+}
+
+function storylineKey(week, firstTeamId, secondTeamId) {
+  const ids = [Number(firstTeamId), Number(secondTeamId)].sort((a, b) => a - b);
+  return `${Number(week)}:${ids[0]}-${ids[1]}`;
+}
+
+function animateBattleEntrance() {
+  document.querySelectorAll('.battle-fighter, .battle-card').forEach(element => {
+    element.classList.remove('battle-entered');
+  });
+
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.battle-fighter, .battle-card').forEach(element => {
+      element.classList.add('battle-entered');
+    });
+  });
+}
+
+function renderStandings() {
+  renderConferenceStandings(0, 'afcStandings');
+  renderConferenceStandings(1, 'nfcStandings');
+}
+
+function renderConferenceStandings(divisionId, targetId) {
+  const target = document.getElementById(targetId);
+
+  const rows = state.standings
+    .filter(row => Number(row.divisionId) === Number(divisionId))
+    .sort((a, b) => {
+      if (a.divisionRank == null && b.divisionRank == null) {
+        return Number(a.teamId) - Number(b.teamId);
+      }
+      return Number(a.divisionRank || 99) - Number(b.divisionRank || 99);
+    });
+
+  target.innerHTML = rows.map(row => {
+    const team = state.teamMap.get(Number(row.teamId));
+    const rank = row.divisionRank == null ? '--' : row.divisionRank;
+
+    return `
+      <tr>
+        <td class="${rank === '--' ? 'rank-dash' : ''}">${rank}</td>
+        <td>
+          <div class="standings-team">
+            <img class="standing-logo custom-team-icon ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
+            <div class="standing-name">
+              <strong>
+                ${escapeHtml(row.teamName)}
+                ${row.defendingChampion ? '<span class="champion-crown">♛</span>' : ''}
+              </strong>
+              <span>${escapeHtml(team ? ownerText(team) : '')}</span>
+            </div>
+          </div>
+        </td>
+        <td>${row.wins}-${row.losses}-${row.ties}</td>
+        <td>${number2(row.pointsFor)}</td>
+        <td>${escapeHtml(row.streak || '-')}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderTeamGallery() {
+  const grid = document.getElementById('teamGrid');
+
+  grid.innerHTML = state.teams.map(team => `
+    <article class="team-card ${team.defendingChampion ? 'is-champion' : ''}" data-team-id="${team.id}" tabindex="0" role="button" aria-label="Open ${escapeAttr(team.name)}">
+      <div class="team-card-top">
+        <img class="team-logo custom-team-icon ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team.name)} mascot" ${teamIconFallbackAttr(team)}>
+        <div>
+          <h3>${escapeHtml(team.name)} ${team.defendingChampion ? '👑' : ''}</h3>
+          <p>${escapeHtml(ownerText(team))}</p>
+        </div>
+      </div>
+      <div class="team-card-bottom">
+        <span>${escapeHtml(team.division)}</span>
+        <span>${team.wins}-${team.losses}-${team.ties}</span>
+      </div>
+    </article>
+  `).join('');
+
+  grid.querySelectorAll('.team-card').forEach(card => {
+    const open = () => openTeamModal(Number(card.dataset.teamId));
+
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
+async function openTeamModal(teamId) {
+  const modal = document.getElementById('teamModal');
+  const content = document.getElementById('teamModalContent');
+  const team = state.teamMap.get(Number(teamId));
+
+  content.innerHTML = `
+    <div class="modal-head">
+      <img class="modal-team-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team ? team.name : 'Team')} mascot" ${teamIconFallbackAttr(team)}>
+      <div>
+        <span class="section-kicker">${escapeHtml(team ? team.division : '')}</span>
+        <h2>${escapeHtml(team ? team.name : 'Team')}</h2>
+        <p>${escapeHtml(team ? ownerText(team) : '')}</p>
+      </div>
+    </div>
+    <div class="roster-list">
+      <div class="skeleton-block"></div>
+    </div>
+  `;
+
+  modal.showModal();
+
+  try {
+    const data = await jsonp('roster', { teamId });
+    const roster = Array.isArray(data.roster) ? data.roster : [];
+
+    content.querySelector('.roster-list').innerHTML = roster.length
+      ? roster.map(player => `
+          <div class="roster-row">
+            <div class="roster-slot">${escapeHtml(player.lineupSlot || player.position || '')}</div>
+            <div class="roster-name">
+              <strong>${escapeHtml(player.name)}</strong>
+              <span>${escapeHtml(player.position || '')}</span>
+            </div>
+            <div class="injury">${player.injuryStatus && player.injuryStatus !== 'ACTIVE' ? escapeHtml(player.injuryStatus) : ''}</div>
+          </div>
+        `).join('')
+      : '<div class="error-panel">Roster is not available yet.</div>';
+  } catch (error) {
+    content.querySelector('.roster-list').innerHTML =
+      `<div class="error-panel">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderFatalError(error) {
+  const message = escapeHtml(error.message || String(error));
+
+  ['featuredMatchup', 'leaguePulse', 'matchupGrid', 'battleFeatured', 'battleGrid'].forEach(id => {
+    const element = document.getElementById(id);
+    if (element) element.innerHTML = `<div class="error-panel">${message}</div>`;
+  });
+}
+
+function setApiStatus(ok, text) {
+  const pill = document.getElementById('apiStatus');
+  pill.classList.remove('is-live', 'is-error');
+  pill.classList.add(ok ? 'is-live' : 'is-error');
+  pill.querySelector('span:last-child').textContent = text;
+}
+
+function getTeamIcon(team) {
+  if (!team) return '';
+  return CUSTOM_TEAM_ICONS[Number(team.id)] || team.logo || '';
+}
+
+function teamIconClass(team) {
+  if (!team) return 'team-icon-unknown';
+  return `team-icon-${Number(team.id)}`;
+}
+
+function teamIconFallbackAttr(team) {
+  if (!team || !team.logo) {
+    return `onerror="this.style.visibility='hidden'"`;
+  }
+
+  const fallback = escapeAttr(team.logo);
+  return `onerror="this.onerror=null;this.src='${fallback}'"`;
+}
+
+function ownerText(team) {
+  if (!team || !Array.isArray(team.owners) || !team.owners.length) return 'Owner unavailable';
+  return team.owners.join(' & ');
+}
+
+function number2(value) {
+  return Number(value || 0).toFixed(2);
+}
+
+function jsonp(mode, params = {}) {
+  return new Promise((resolve, reject) => {
+    const callback = `zenniJsonp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+    const query = new URLSearchParams({
+      mode,
+      callback,
+      _: Date.now().toString(),
+      ...Object.fromEntries(
+        Object.entries(params).map(([key, value]) => [key, String(value)])
+      )
+    });
+
+    const script = document.createElement('script');
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('The ESPN fantasy API took too long to respond.'));
+    }, 15000);
+
+    function cleanup() {
+      clearTimeout(timeout);
+      script.remove();
+      delete window[callback];
+    }
+
+    window[callback] = data => {
+      cleanup();
+      resolve(data);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error('Unable to reach the Zenni Fantasy API.'));
+    };
+
+    script.src = `${API_URL}?${query.toString()}`;
+    document.body.appendChild(script);
+  });
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}

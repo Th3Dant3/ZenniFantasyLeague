@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <title>Zenni League 2026</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="fantasy.css">
+</head>
+<body>
+
+  <div class="league-loader" id="leagueLoader" role="status" aria-live="polite">
+    <div class="loader-stadium" aria-hidden="true">
+      <span class="loader-light loader-light-1"></span>
+      <span class="loader-light loader-light-2"></span>
+      <span class="loader-light loader-light-3"></span>
+      <span class="loader-light loader-light-4"></span>
+    </div>
+
+    <div class="loader-content">
+      <div class="loader-season">2026 FANTASY FOOTBALL</div>
+
+      <h1 class="loader-title">
+        <span>ZENNI</span>
+        <span>LEAGUE</span>
+      </h1>
+
+      <div class="loader-belt" aria-hidden="true">
+        <div class="belt-strap belt-strap-left"></div>
+
+        <div class="belt-sideplate belt-sideplate-left">
+          <span>Z</span>
+        </div>
+
+        <div class="belt-centerplate">
+          <div class="belt-centerplate-inner">
+            <span class="belt-crown">♛</span>
+            <small>ZENNI</small>
+            <strong>CHAMPION</strong>
+            <span class="belt-year">2026</span>
+          </div>
+          <div class="belt-shine"></div>
+        </div>
+
+        <div class="belt-sideplate belt-sideplate-right">
+          <span>Z</span>
+        </div>
+
+        <div class="belt-strap belt-strap-right"></div>
+      </div>
+
+      <div class="loader-copy">
+        <strong id="loaderHeadline">LOADING THE BATTLEFIELD</strong>
+        <span id="loaderMessage">Connecting to ESPN Fantasy...</span>
+      </div>
+
+      <div class="loader-progress-shell" aria-hidden="true">
+        <div class="loader-progress-bar" id="loaderProgressBar"></div>
+        <div class="loader-progress-flare"></div>
+      </div>
+
+      <div class="loader-progress-row">
+        <span id="loaderStage">Initializing league</span>
+        <strong id="loaderPercent">0%</strong>
+      </div>
+    </div>
+  </div>
+
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brand" href="#top" data-tab-target="overview" aria-label="Zenni League home">
+        <span class="brand-mark">Z</span>
+        <span>
+          <strong>Zenni League</strong>
+          <small>Fantasy Football 2026</small>
+        </span>
+      </a>
+
+      <nav class="topnav" aria-label="Primary">
+        <button class="nav-tab is-active" type="button" data-tab="overview">Overview</button>
+        <button class="nav-tab battle-nav" type="button" data-tab="battle">Battle Center</button>
+        <button class="nav-tab" type="button" data-tab="standings">Standings</button>
+        <button class="nav-tab" type="button" data-tab="teams">Teams</button>
+      </nav>
+
+      <div class="live-pill" id="apiStatus">
+        <span class="status-dot"></span>
+        <span>Connecting...</span>
+      </div>
+    </header>
+
+    <div class="mobile-tabs" aria-label="League sections">
+      <button class="mobile-tab is-active" type="button" data-tab="overview">Overview</button>
+      <button class="mobile-tab battle-nav" type="button" data-tab="battle">⚔ Battle</button>
+      <button class="mobile-tab" type="button" data-tab="standings">Standings</button>
+      <button class="mobile-tab" type="button" data-tab="teams">Teams</button>
+    </div>
+
+    <main id="top">
+      <section class="view-panel is-active" data-view="overview">
+        <section class="hero">
+          <div class="hero-backdrop" aria-hidden="true"></div>
+          <div class="hero-overlay" aria-hidden="true"></div>
+
+          <div class="hero-copy">
+            <div class="eyebrow">2026 Fantasy Football</div>
+            <h1>THE ROAD TO<br><span>THE ZENNI CUP</span></h1>
+            <p id="heroSubtext">Live league data powered by ESPN Fantasy.</p>
+
+            <div class="hero-stats">
+              <div>
+                <span class="stat-value" id="heroWeek">1</span>
+                <span class="stat-label">Current Week</span>
+              </div>
+              <div>
+                <span class="stat-value" id="heroTeams">12</span>
+                <span class="stat-label">Teams</span>
+              </div>
+              <div>
+                <span class="stat-value" id="heroPlayoffs">8</span>
+                <span class="stat-label">Playoff Spots</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="hero-poster">
+            <img src="zenni-league-2026.png" alt="Zenni League 2026 championship poster">
+          </div>
+        </section>
+
+        <section class="champion-strip">
+          <div class="champion-icon">💍</div>
+          <div class="champion-copy">
+            <span class="section-kicker">Defending Champion</span>
+            <h2 id="championName">Main Event Dante</h2>
+            <p id="championOwner">2025 Zenni League Champion</p>
+          </div>
+          <div class="champion-badge">
+            <span>1×</span>
+            <small>Champion</small>
+          </div>
+        </section>
+
+        <section class="dashboard-grid">
+          <article class="feature-card game-card">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">Match of the Week</span>
+                <h2 id="featuredStoryTitle">Game of the Week</h2>
+                <p class="featured-story-subtitle" id="featuredStorySubtitle"></p>
+              </div>
+              <span class="week-chip" id="featuredWeek">Week 1</span>
+            </div>
+
+            <div id="featuredMatchup" class="featured-matchup skeleton-block"></div>
+            <div id="featuredStoryReason" class="featured-story-reason"></div>
+
+            <button class="battle-cta" type="button" data-tab-open="battle">
+              Enter Battle Center
+              <span>→</span>
+            </button>
+          </article>
+
+          <article class="feature-card pulse-card">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">League Pulse</span>
+                <h2>What Matters Now</h2>
+              </div>
+            </div>
+            <div id="leaguePulse" class="pulse-list skeleton-block"></div>
+          </article>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">This Week</span>
+              <h2>League Matchups</h2>
+            </div>
+            <div class="week-switcher">
+              <button type="button" class="week-button" id="prevWeek" aria-label="Previous week">‹</button>
+              <span id="matchupWeekLabel">Week 1</span>
+              <button type="button" class="week-button" id="nextWeek" aria-label="Next week">›</button>
+            </div>
+          </div>
+
+          <div class="matchup-grid" id="matchupGrid"></div>
+        </section>
+      </section>
+
+      <section class="view-panel battle-center" data-view="battle">
+        <section class="battle-hero">
+          <div class="battle-hero-copy">
+            <span class="section-kicker">Zenni League Fight Night</span>
+            <h1>BATTLE CENTER</h1>
+            <p>Every matchup gets a face-off. One matchup gets the spotlight because the story actually means something.</p>
+          </div>
+
+          <div class="battle-week-control">
+            <button type="button" class="week-button battle-week-button" id="battlePrevWeek" aria-label="Previous battle week">‹</button>
+            <div>
+              <span>Battle Card</span>
+              <strong id="battleWeekLabel">Week 1</strong>
+            </div>
+            <button type="button" class="week-button battle-week-button" id="battleNextWeek" aria-label="Next battle week">›</button>
+          </div>
+        </section>
+
+        <section class="motw-arena" id="battleFeatured">
+          <div class="arena-loading skeleton-block"></div>
+        </section>
+
+        <section class="battle-card-section">
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">Full Battle Card</span>
+              <h2>Week <span id="battleCardWeek">1</span> Face-Offs</h2>
+            </div>
+            <span class="battle-count" id="battleCount">6 battles</span>
+          </div>
+
+          <div class="battle-grid" id="battleGrid"></div>
+        </section>
+      </section>
+
+      <section class="view-panel" data-view="standings">
+        <section class="section-block standings-view">
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">Conference Race</span>
+              <h2>Standings</h2>
+            </div>
+            <span class="preseason-note" id="standingsNote">Preseason — rankings begin after Week 1</span>
+          </div>
+
+          <div class="conference-grid">
+            <article class="standings-card afc-card">
+              <div class="conference-title">
+                <span class="conference-dot"></span>
+                <div>
+                  <span>Zenni</span>
+                  <strong>AFC</strong>
+                </div>
+              </div>
+              <div class="standings-table-wrap">
+                <table class="standings-table">
+                  <thead>
+                    <tr>
+                      <th>RK</th>
+                      <th>Team</th>
+                      <th>W-L-T</th>
+                      <th>PF</th>
+                      <th>STRK</th>
+                    </tr>
+                  </thead>
+                  <tbody id="afcStandings"></tbody>
+                </table>
+              </div>
+            </article>
+
+            <article class="standings-card nfc-card">
+              <div class="conference-title">
+                <span class="conference-dot"></span>
+                <div>
+                  <span>Zenni</span>
+                  <strong>NFC</strong>
+                </div>
+              </div>
+              <div class="standings-table-wrap">
+                <table class="standings-table">
+                  <thead>
+                    <tr>
+                      <th>RK</th>
+                      <th>Team</th>
+                      <th>W-L-T</th>
+                      <th>PF</th>
+                      <th>STRK</th>
+                    </tr>
+                  </thead>
+                  <tbody id="nfcStandings"></tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-panel" data-view="teams">
+        <section class="section-block teams-view">
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">The League</span>
+              <h2>Team Gallery</h2>
+            </div>
+            <span class="muted">Click a team for roster details</span>
+          </div>
+
+          <div class="team-grid" id="teamGrid"></div>
+        </section>
+      </section>
+    </main>
+
+    <footer>
+      <span>Zenni League 2026</span>
+      <span id="lastUpdated">Waiting for ESPN...</span>
+    </footer>
+  </div>
+
+  <dialog class="team-modal" id="teamModal">
+    <button class="modal-close" id="modalClose" type="button" aria-label="Close">×</button>
+    <div id="teamModalContent"></div>
+  </dialog>
+
+  <script src="fantasy.js"></script>
+</body>
+</html>
+ 
