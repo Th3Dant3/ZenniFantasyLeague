@@ -101,94 +101,123 @@
 
     <main id="top">
       <section class="view-panel is-active" data-view="overview">
-        <section class="hero">
-          <div class="hero-backdrop" aria-hidden="true"></div>
-          <div class="hero-overlay" aria-hidden="true"></div>
+        <section class="overview-command-layout">
+          <section class="hero hero-command">
+            <div class="hero-backdrop" aria-hidden="true"></div>
+            <div class="hero-overlay" aria-hidden="true"></div>
 
-          <div class="hero-copy">
-            <div class="eyebrow">2026 Fantasy Football</div>
-            <h1>THE ROAD TO<br><span>THE ZENNI CUP</span></h1>
-            <p id="heroSubtext">Live league data powered by ESPN Fantasy.</p>
+            <div class="hero-copy">
+              <div class="eyebrow">2026 Fantasy Football</div>
+              <h1>ROAD TO THE<br><span>ZENNI CUP</span></h1>
+              <p id="heroSubtext">The field is set. Twelve teams. One Zenni Cup.</p>
 
-            <div class="hero-stats">
-              <div>
-                <span class="stat-value" id="heroWeek">1</span>
-                <span class="stat-label">Current Week</span>
-              </div>
-              <div>
-                <span class="stat-value" id="heroTeams">12</span>
-                <span class="stat-label">Teams</span>
-              </div>
-              <div>
-                <span class="stat-value" id="heroPlayoffs">8</span>
-                <span class="stat-label">Playoff Spots</span>
-              </div>
-            </div>
-          </div>
+              <button class="hero-battle-cta" type="button" data-tab-open="battle">
+                <span>Enter Battle Center</span>
+                <strong>→</strong>
+              </button>
 
-          <div class="hero-poster">
-            <img src="zenni-league-2026.png" alt="Zenni League 2026 championship poster">
-          </div>
-        </section>
-
-        <section class="champion-strip">
-          <div class="champion-icon">💍</div>
-          <div class="champion-copy">
-            <span class="section-kicker">Defending Champion</span>
-            <h2 id="championName">Main Event Dante</h2>
-            <p id="championOwner">2025 Zenni League Champion</p>
-          </div>
-          <div class="champion-badge">
-            <span>1×</span>
-            <small>Champion</small>
-          </div>
-        </section>
-
-        <section class="dashboard-grid">
-          <article class="feature-card game-card">
-            <div class="section-heading">
-              <div>
-                <span class="section-kicker">Match of the Week</span>
-                <h2 id="featuredStoryTitle">Game of the Week</h2>
-                <p class="featured-story-subtitle" id="featuredStorySubtitle"></p>
-              </div>
-              <span class="week-chip" id="featuredWeek">Week 1</span>
-            </div>
-
-            <div id="featuredMatchup" class="featured-matchup skeleton-block"></div>
-            <div id="featuredStoryReason" class="featured-story-reason"></div>
-
-            <button class="battle-cta" type="button" data-tab-open="battle">
-              Enter Battle Center
-              <span>→</span>
-            </button>
-          </article>
-
-          <article class="feature-card pulse-card">
-            <div class="section-heading">
-              <div>
-                <span class="section-kicker">League Pulse</span>
-                <h2>What Matters Now</h2>
+              <div class="hero-stats">
+                <div class="hero-stat-card">
+                  <span class="hero-stat-icon">▣</span>
+                  <span class="stat-value" id="heroWeek">1</span>
+                  <span class="stat-label">Current Week</span>
+                </div>
+                <div class="hero-stat-card">
+                  <span class="hero-stat-icon">♟</span>
+                  <span class="stat-value" id="heroTeams">12</span>
+                  <span class="stat-label">Teams</span>
+                </div>
+                <div class="hero-stat-card">
+                  <span class="hero-stat-icon">🏆</span>
+                  <span class="stat-value" id="heroPlayoffs">8</span>
+                  <span class="stat-label">Playoff Spots</span>
+                </div>
               </div>
             </div>
-            <div id="leaguePulse" class="pulse-list skeleton-block"></div>
-          </article>
-        </section>
 
-        <section class="section-block">
-          <div class="section-heading">
-            <div>
-              <span class="section-kicker">This Week</span>
-              <h2>League Matchups</h2>
+            <div class="hero-poster hero-poster-command">
+              <img src="zenni-league-2026.png" alt="Zenni League 2026 championship poster">
             </div>
-            <div class="week-switcher">
-              <button type="button" class="week-button" id="prevWeek" aria-label="Previous week">‹</button>
-              <span id="matchupWeekLabel">Week 1</span>
-              <button type="button" class="week-button" id="nextWeek" aria-label="Next week">›</button>
-            </div>
+          </section>
+
+          <div class="overview-stats-row">
+            <section class="feature-card top-stats-card top-performers-card">
+              <div class="section-heading compact-heading performers-heading">
+                <div>
+                  <span class="section-kicker">Weekly Leaders</span>
+                  <h2>Top Performers</h2>
+                </div>
+                <span class="performers-week" id="performersWeekLabel">Week 1</span>
+              </div>
+              <div class="top-stats-grid performers-grid skeleton-block" id="overviewTopStats"></div>
+            </section>
+
+            <article class="feature-card pulse-card command-pulse-card weekly-spotlight-card">
+              <div class="section-heading compact-heading">
+                <div>
+                  <span class="section-kicker">Weekly Spotlight</span>
+                  <h2>Team Performance</h2>
+                </div>
+                <button class="panel-link" type="button" data-tab-open="battle">View Battles →</button>
+              </div>
+              <div id="leaguePulse" class="pulse-list weekly-spotlight-list skeleton-block"></div>
+            </article>
+
+            <article class="feature-card spotlight-card" id="championSpotlight"></article>
           </div>
 
-          <div class="matchup-grid" id="matchupGrid"></div>
+          <div class="overview-bottom-row">
+            <article class="feature-card game-card command-motw-card">
+              <div class="section-heading compact-heading">
+                <div>
+                  <span class="section-kicker">Match of the Week</span>
+                  <h2 id="featuredStoryTitle">Game of the Week</h2>
+                  <p class="featured-story-subtitle" id="featuredStorySubtitle"></p>
+                </div>
+                <span class="week-chip" id="featuredWeek">Week 1</span>
+              </div>
+
+              <div id="featuredMatchup" class="featured-matchup skeleton-block"></div>
+              <div id="featuredStoryReason" class="featured-story-reason"></div>
+
+              <button class="battle-cta" type="button" data-tab-open="battle">
+                View Full Preview
+                <span>→</span>
+              </button>
+            </article>
+
+            <article class="feature-card matchup-board-card">
+              <div class="section-heading compact-heading">
+                <div>
+                  <span class="section-kicker">This Week</span>
+                  <h2>League Matchups</h2>
+                </div>
+                <div class="week-switcher">
+                  <button type="button" class="week-button" id="prevWeek" aria-label="Previous week">‹</button>
+                  <span id="overviewWeekLabel">Week 1</span>
+                  <button type="button" class="week-button" id="nextWeek" aria-label="Next week">›</button>
+                </div>
+              </div>
+              <div class="overview-matchups-grid" id="overviewMatchups"></div>
+              <button class="battle-cta board-cta" type="button" data-tab-open="battle">
+                View All Matchups
+                <span>→</span>
+              </button>
+            </article>
+
+            <article class="feature-card standings-preview-card">
+              <div class="section-heading compact-heading">
+                <div>
+                  <span class="section-kicker">Standings Preview</span>
+                  <h2>Race Snapshot</h2>
+                </div>
+                <button class="panel-link" type="button" data-tab-open="standings">View All →</button>
+              </div>
+              <div id="standingsPreview" class="standings-preview-list"></div>
+            </article>
+          </div>
+
+          <section class="glance-ribbon" id="glanceRibbon"></section>
         </section>
       </section>
 

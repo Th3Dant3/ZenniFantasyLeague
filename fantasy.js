@@ -61,6 +61,8 @@ const state = {
   currentMatchups: [],
   selectedWeek: 1,
   weekCache: new Map(),
+  playerPerformanceCache: new Map(),
+  performerRequestToken: 0,
   activeView: 'overview'
 };
 
@@ -273,39 +275,301 @@ function hydrateState(data) {
 }
 
 function renderAll() {
-  renderChampion();
-  renderLeaguePulse();
+  renderChampionSpotlight();
   renderStandings();
+  renderStandingsPreview();
   renderTeamGallery();
+  renderGlanceRibbon();
   renderWeek(state.currentMatchups, state.selectedWeek);
 }
 
 function renderWeek(matchups, week) {
   state.selectedWeek = Number(week);
   syncWeekLabels(week);
-  renderMatchupGrid(matchups, week);
+  renderOverviewMatchups(matchups, week);
   renderFeaturedMatchup(matchups, week);
   renderBattleCenter(matchups, week);
+  renderLeaguePulse(matchups, week);
+  renderOverviewTopStats(week);
 }
 
 function syncWeekLabels(week) {
   document.getElementById('featuredWeek').textContent = `Week ${week}`;
-  document.getElementById('matchupWeekLabel').textContent = `Week ${week}`;
+  document.getElementById('overviewWeekLabel').textContent = `Week ${week}`;
   document.getElementById('battleWeekLabel').textContent = `Week ${week}`;
   document.getElementById('battleCardWeek').textContent = week;
 }
 
-function renderChampion() {
+function renderChampionSpotlight() {
   const champion = state.teams.find(team => team.defendingChampion);
+  const container = document.getElementById('championSpotlight');
 
-  if (!champion) return;
+  if (!container) return;
 
-  document.getElementById('championName').textContent = champion.name;
-  document.getElementById('championOwner').textContent =
-    `${ownerText(champion)} • 2025 Zenni League Champion`;
+  if (!champion) {
+    container.innerHTML = '<div class="error-panel">No defending champion was found.</div>';
+    return;
+  }
 
-  const badge = document.querySelector('.champion-badge span');
-  badge.textContent = `${champion.championships || 1}×`;
+  const icon = getTeamIcon(champion);
+  container.innerHTML = `
+    <div class="spotlight-header">
+      <span class="section-kicker">Champion Spotlight</span>
+    </div>
+    <div class="spotlight-art-wrap">
+      <img class="spotlight-art ${teamIconClass(champion)}" src="${escapeAttr(icon)}" alt="${escapeAttr(champion.name)} mascot" ${teamIconFallbackAttr(champion)}>
+    </div>
+    <div class="spotlight-identity">
+      <div class="spotlight-mini-badge">
+        <img class="spotlight-badge-icon ${teamIconClass(champion)}" src="${escapeAttr(icon)}" alt="" ${teamIconFallbackAttr(champion)}>
+      </div>
+      <div>
+        <h3>${escapeHtml(champion.name)}</h3>
+        <p>${escapeHtml(ownerText(champion))}</p>
+      </div>
+    </div>
+    <div class="spotlight-meta">2025 Zenni League Champion</div>
+    <div class="spotlight-footer">
+      <span class="section-kicker">Defending Champion</span>
+      <div class="spotlight-titlecount">
+        <strong>${escapeHtml(String(champion.championships || 1))}×</strong>
+        <small>Champion</small>
+      </div>
+    </div>
+  `;
+}
+
+function renderOverviewTopStats(week = state.selectedWeek) {
+  const container = document.getElementById('overviewTopStats');
+  const weekLabel = document.getElementById('performersWeekLabel');
+
+  if (!container) return;
+  if (weekLabel) weekLabel.textContent = `Week ${week}`;
+
+  container.classList.add('skeleton-block');
+  container.innerHTML = `
+    <div class="performers-loading">
+      <strong>Loading weekly player leaders...</strong>
+      <span>QB · RB · WR · TE · K · DST</span>
+    </div>
+  `;
+
+  loadTopPerformers(Number(week));
+}
+
+async function loadTopPerformers(week) {
+  const container = document.getElementById('overviewTopStats');
+  if (!container) return;
+
+  const requestToken = ++state.performerRequestToken;
+
+  try {
+    if (!state.playerPerformanceCache.has(week)) {
+      const rosterResponses = await Promise.allSettled(
+        state.teams.map(async team => {
+          const data = await jsonp('roster', { teamId: team.id, week });
+          return {
+            team,
+            roster: Array.isArray(data && data.roster) ? data.roster : []
+          };
+        })
+      );
+
+      const playerPool = [];
+
+      rosterResponses.forEach(result => {
+        if (result.status !== 'fulfilled') return;
+
+        const { team, roster } = result.value;
+        roster.forEach(player => {
+          const points = getWeeklyPlayerPoints(player, week);
+          const position = normalizeFantasyPosition(player.position || player.lineupSlot);
+
+          if (!position || points == null) return;
+
+          playerPool.push({
+            name: player.name || 'Unknown Player',
+            position,
+            points,
+            nflTeam: getPlayerNflTeam(player),
+            fantasyTeam: team.name,
+            fantasyTeamId: Number(team.id)
+          });
+        });
+      });
+
+      state.playerPerformanceCache.set(week, playerPool);
+    }
+
+    if (requestToken !== state.performerRequestToken || Number(state.selectedWeek) !== Number(week)) {
+      return;
+    }
+
+    const playerPool = state.playerPerformanceCache.get(week) || [];
+    const positions = ['QB', 'RB', 'WR', 'TE', 'K', 'DST'];
+
+    const leaders = positions.map(position => {
+      return playerPool
+        .filter(player => player.position === position)
+        .sort((a, b) => b.points - a.points)[0] || null;
+    });
+
+    const available = leaders.filter(Boolean);
+
+    container.classList.remove('skeleton-block');
+
+    if (!available.length) {
+      container.innerHTML = `
+        <div class="performers-empty">
+          <strong>Player scoring is waiting on the API.</strong>
+          <span>The current roster feed does not include weekly fantasy points yet. The card will populate automatically once the roster response returns a weekly point value.</span>
+        </div>
+      `;
+      return;
+    }
+
+    const overall = available.slice().sort((a, b) => b.points - a.points)[0];
+
+    container.innerHTML = leaders.map((leader, index) => {
+      const position = positions[index];
+
+      if (!leader) {
+        return `
+          <div class="performer-row is-pending">
+            <div class="performer-position">${position}</div>
+            <div class="performer-copy">
+              <strong>Scoring pending</strong>
+              <span>Waiting for ESPN player points</span>
+            </div>
+            <div class="performer-points">—</div>
+          </div>
+        `;
+      }
+
+      const isPlayerOfWeek =
+        overall &&
+        leader.name === overall.name &&
+        leader.position === overall.position &&
+        Number(leader.points) === Number(overall.points);
+
+      return `
+        <div class="performer-row ${isPlayerOfWeek ? 'is-player-week' : ''}">
+          <div class="performer-position">${escapeHtml(position)}</div>
+          <div class="performer-copy">
+            <div class="performer-name-line">
+              <strong>${escapeHtml(leader.name)}</strong>
+              ${isPlayerOfWeek ? '<span class="player-week-badge">Player of Week</span>' : ''}
+            </div>
+            <span>${escapeHtml(leader.nflTeam)} · ${escapeHtml(leader.fantasyTeam)}</span>
+          </div>
+          <div class="performer-points">
+            <strong>${number2(leader.points)}</strong>
+            <small>PTS</small>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (error) {
+    if (requestToken !== state.performerRequestToken) return;
+
+    container.classList.remove('skeleton-block');
+    container.innerHTML = `
+      <div class="performers-empty">
+        <strong>Unable to load player leaders.</strong>
+        <span>${escapeHtml(error.message || String(error))}</span>
+      </div>
+    `;
+  }
+}
+
+function getWeeklyPlayerPoints(player, week) {
+  if (!player || typeof player !== 'object') return null;
+
+  const directCandidates = [
+    player.weekPoints,
+    player.weeklyPoints,
+    player.fantasyPoints,
+    player.points,
+    player.appliedStatTotal,
+    player.score,
+    player.actualPoints,
+    player.scoringPeriodPoints
+  ];
+
+  for (const value of directCandidates) {
+    const parsed = parseFiniteNumber(value);
+    if (parsed != null) return parsed;
+  }
+
+  const weekKeys = [String(week), `week${week}`, `W${week}`];
+  const containers = [
+    player.pointsByWeek,
+    player.weeklyScores,
+    player.scoringPeriods,
+    player.statsByWeek
+  ];
+
+  for (const source of containers) {
+    if (!source || typeof source !== 'object') continue;
+
+    for (const key of weekKeys) {
+      const entry = source[key];
+      if (entry == null) continue;
+
+      if (typeof entry === 'number' || typeof entry === 'string') {
+        const parsed = parseFiniteNumber(entry);
+        if (parsed != null) return parsed;
+      }
+
+      if (typeof entry === 'object') {
+        for (const nested of [
+          entry.points,
+          entry.fantasyPoints,
+          entry.appliedStatTotal,
+          entry.score
+        ]) {
+          const parsed = parseFiniteNumber(nested);
+          if (parsed != null) return parsed;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseFiniteNumber(value) {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeFantasyPosition(value) {
+  const raw = String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+
+  if (raw === 'D/ST' || raw === 'DEF' || raw === 'DST') return 'DST';
+  if (raw === 'QB') return 'QB';
+  if (raw === 'RB' || raw === 'HB' || raw === 'FB') return 'RB';
+  if (raw === 'WR') return 'WR';
+  if (raw === 'TE') return 'TE';
+  if (raw === 'K' || raw === 'PK') return 'K';
+  return '';
+}
+
+function getPlayerNflTeam(player) {
+  const value =
+    player.proTeamAbbrev ||
+    player.proTeam ||
+    player.nflTeam ||
+    player.nflTeamAbbrev ||
+    player.teamAbbrev ||
+    player.team ||
+    '';
+
+  return String(value || 'NFL');
 }
 
 function renderFeaturedMatchup(matchups, week) {
@@ -375,42 +639,145 @@ function featuredTeamMarkup(team, score, side) {
   `;
 }
 
-function renderLeaguePulse() {
+function renderLeaguePulse(matchups = state.currentMatchups, week = state.selectedWeek) {
   const container = document.getElementById('leaguePulse');
-  const preseason = Number(state.league.latestScoringPeriod || 0) < 1;
+  if (!container) return;
 
-  const champion = state.teams.find(team => team.defendingChampion);
-  const afc = state.teams.filter(team => Number(team.divisionId) === 0).length;
-  const nfc = state.teams.filter(team => Number(team.divisionId) === 1).length;
+  const games = Array.isArray(matchups) ? matchups : [];
+  const scoredGames = games.filter(match =>
+    Number(match.homeScore || 0) > 0 ||
+    Number(match.awayScore || 0) > 0
+  );
 
-  const items = preseason
-    ? [
-        ['👑 Champion Watch', `${champion ? champion.name : 'The champion'} begins the title defense in Week ${state.league.currentWeek}.`],
-        ['⚔️ Conference Balance', `${afc} AFC teams and ${nfc} NFC teams are chasing ${state.league.playoffTeams} playoff spots.`],
-        ['🏈 Season Format', `${state.league.regularSeasonWeeks} regular-season weeks before the Zenni Cup playoff run.`],
-        ['🔥 Opening Card', `${state.currentMatchups.length} Week 1 battles are locked in.`]
-      ]
-    : buildLivePulse();
+  const weekIsComplete = Number(state.league.latestScoringPeriod || 0) >= Number(week);
+  const hasMeaningfulScores = scoredGames.length > 0;
 
-  container.innerHTML = items.map(([title, detail]) => `
-    <div class="pulse-item">
-      <strong>${escapeHtml(title)}</strong>
-      <span>${escapeHtml(detail)}</span>
+  container.classList.remove('skeleton-block');
+
+  if (!hasMeaningfulScores) {
+    const scheduledCount = games.length;
+    container.innerHTML = `
+      <div class="weekly-spotlight-waiting">
+        <div class="spotlight-wait-icon">🏈</div>
+        <div>
+          <strong>Week ${escapeHtml(String(week))} spotlight is waiting for kickoff.</strong>
+          <span>${escapeHtml(String(scheduledCount))} matchups are scheduled. High score, biggest win, closest battle and the week's shootout will appear here as points come in.</span>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const teamScores = [];
+
+  scoredGames.forEach(match => {
+    const home = state.teamMap.get(Number(match.homeTeamId));
+    const away = state.teamMap.get(Number(match.awayTeamId));
+
+    if (home) {
+      teamScores.push({
+        team: home,
+        score: Number(match.homeScore || 0),
+        opponent: away,
+        opponentScore: Number(match.awayScore || 0)
+      });
+    }
+
+    if (away) {
+      teamScores.push({
+        team: away,
+        score: Number(match.awayScore || 0),
+        opponent: home,
+        opponentScore: Number(match.homeScore || 0)
+      });
+    }
+  });
+
+  const highScore = teamScores.slice().sort((a, b) => b.score - a.score)[0];
+
+  const decidedGames = scoredGames.filter(match =>
+    Number(match.homeScore || 0) !== Number(match.awayScore || 0)
+  );
+
+  const biggestWinMatch = decidedGames.slice().sort((a, b) => {
+    const marginA = Math.abs(Number(a.homeScore || 0) - Number(a.awayScore || 0));
+    const marginB = Math.abs(Number(b.homeScore || 0) - Number(b.awayScore || 0));
+    return marginB - marginA;
+  })[0];
+
+  const closestMatch = decidedGames.slice().sort((a, b) => {
+    const marginA = Math.abs(Number(a.homeScore || 0) - Number(a.awayScore || 0));
+    const marginB = Math.abs(Number(b.homeScore || 0) - Number(b.awayScore || 0));
+    return marginA - marginB;
+  })[0];
+
+  const shootoutMatch = scoredGames.slice().sort((a, b) =>
+    (Number(b.homeScore || 0) + Number(b.awayScore || 0)) -
+    (Number(a.homeScore || 0) + Number(a.awayScore || 0))
+  )[0];
+
+  const items = [];
+
+  if (highScore) {
+    items.push({
+      icon: '🏆',
+      label: weekIsComplete ? 'Team of the Week' : 'High Score Right Now',
+      title: highScore.team.name,
+      detail: `${number2(highScore.score)} points${highScore.opponent ? ` vs ${highScore.opponent.name}` : ''}.`
+    });
+  }
+
+  if (biggestWinMatch) {
+    const homeScore = Number(biggestWinMatch.homeScore || 0);
+    const awayScore = Number(biggestWinMatch.awayScore || 0);
+    const winnerId = homeScore > awayScore ? biggestWinMatch.homeTeamId : biggestWinMatch.awayTeamId;
+    const winner = state.teamMap.get(Number(winnerId));
+    const margin = Math.abs(homeScore - awayScore);
+
+    items.push({
+      icon: '🔥',
+      label: 'Biggest Win',
+      title: winner ? winner.name : 'Weekly leader',
+      detail: `${number2(margin)}-point margin.`
+    });
+  }
+
+  if (closestMatch) {
+    const home = state.teamMap.get(Number(closestMatch.homeTeamId));
+    const away = state.teamMap.get(Number(closestMatch.awayTeamId));
+    const margin = Math.abs(Number(closestMatch.homeScore || 0) - Number(closestMatch.awayScore || 0));
+
+    items.push({
+      icon: '⚡',
+      label: 'Closest Battle',
+      title: `${home ? home.name : 'Home'} vs ${away ? away.name : 'Away'}`,
+      detail: `${number2(margin)} points separate them.`
+    });
+  }
+
+  if (shootoutMatch) {
+    const home = state.teamMap.get(Number(shootoutMatch.homeTeamId));
+    const away = state.teamMap.get(Number(shootoutMatch.awayTeamId));
+    const total = Number(shootoutMatch.homeScore || 0) + Number(shootoutMatch.awayScore || 0);
+
+    items.push({
+      icon: '💥',
+      label: 'Weekly Shootout',
+      title: `${home ? home.name : 'Home'} vs ${away ? away.name : 'Away'}`,
+      detail: `${number2(total)} combined points.`
+    });
+  }
+
+  container.innerHTML = items.slice(0, 4).map(item => `
+    <div class="pulse-item weekly-spotlight-item">
+      <div class="weekly-spotlight-icon">${item.icon}</div>
+      <div class="weekly-spotlight-copy">
+        <small>${escapeHtml(item.label)}</small>
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.detail)}</span>
+      </div>
     </div>
   `).join('');
-}
-
-function buildLivePulse() {
-  const sortedByPF = state.teams.slice().sort((a, b) => Number(b.pointsFor) - Number(a.pointsFor));
-  const hottest = state.teams.slice().sort((a, b) => Number(b.streakLength) - Number(a.streakLength))[0];
-  const leader = state.standings.find(row => row.overallRank === 1) || sortedByPF[0];
-
-  return [
-    ['🔥 League Leader', leader ? `${leader.teamName || leader.name} currently sits on top.` : 'Standings are updating.'],
-    ['💥 Scoring Leader', sortedByPF[0] ? `${sortedByPF[0].name} leads with ${number2(sortedByPF[0].pointsFor)} PF.` : 'Scoring data pending.'],
-    ['📈 Hot Streak', hottest && hottest.streakLength ? `${hottest.name}: ${hottest.streakType} ${hottest.streakLength}.` : 'No active streak has separated from the pack yet.'],
-    ['🏆 Playoff Race', `${state.league.playoffTeams} of ${state.league.teamCount} teams will make the postseason.`]
-  ];
 }
 
 async function changeWeek(delta) {
@@ -443,21 +810,23 @@ async function getWeekMatchups(week) {
 
 function setWeekLoading(week) {
   syncWeekLabels(week);
-  document.getElementById('matchupGrid').innerHTML = '<div class="skeleton-block"></div>';
+  document.getElementById('overviewMatchups').innerHTML = '<div class="skeleton-block"></div>';
   document.getElementById('battleGrid').innerHTML = '<div class="skeleton-block"></div>';
   document.getElementById('battleFeatured').innerHTML = '<div class="arena-loading skeleton-block"></div>';
 }
 
 function renderWeekError(error, week) {
   const message = escapeHtml(error.message || String(error));
-  document.getElementById('matchupGrid').innerHTML = `<div class="error-panel">${message}</div>`;
+  document.getElementById('overviewMatchups').innerHTML = `<div class="error-panel">${message}</div>`;
   document.getElementById('battleGrid').innerHTML = `<div class="error-panel">${message}</div>`;
   document.getElementById('battleFeatured').innerHTML = `<div class="error-panel">${message}</div>`;
   syncWeekLabels(week);
 }
 
-function renderMatchupGrid(matchups, week) {
-  const grid = document.getElementById('matchupGrid');
+function renderOverviewMatchups(matchups, week) {
+  const grid = document.getElementById('overviewMatchups');
+
+  if (!grid) return;
 
   if (!matchups.length) {
     grid.innerHTML = '<div class="error-panel">No matchups returned for this week.</div>';
@@ -468,18 +837,35 @@ function renderMatchupGrid(matchups, week) {
     const home = state.teamMap.get(Number(match.homeTeamId));
     const away = state.teamMap.get(Number(match.awayTeamId));
     const story = getMatchupStory(match, week);
+    const featured = story.featured ? 'is-highlight' : '';
 
     return `
-      <article class="matchup-card">
-        ${matchupRowMarkup(home, match.homeScore)}
-        ${matchupRowMarkup(away, match.awayScore)}
-        <div class="matchup-footer">
+      <article class="overview-matchup-card ${featured}">
+        <div class="overview-matchup-teams">
+          ${overviewMatchupTeamMarkup(home, match.homeScore, 'home')}
+          <div class="overview-versus">VS</div>
+          ${overviewMatchupTeamMarkup(away, match.awayScore, 'away')}
+        </div>
+        <div class="overview-matchup-footer">
           <span>${escapeHtml(story.tag)}</span>
           <span>${escapeHtml(match.status || 'Scheduled')}</span>
         </div>
       </article>
     `;
   }).join('');
+}
+
+function overviewMatchupTeamMarkup(team, score, side) {
+  return `
+    <div class="overview-matchup-team overview-matchup-${side}">
+      <img class="matchup-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
+      <div class="overview-team-text">
+        <div class="matchup-team-name">${escapeHtml(team ? team.name : 'Unknown Team')}</div>
+        <div class="matchup-owner">${escapeHtml(team ? ownerText(team) : '')}</div>
+      </div>
+      <div class="matchup-score">${number2(score)}</div>
+    </div>
+  `;
 }
 
 function matchupRowMarkup(team, score) {
@@ -661,6 +1047,81 @@ function renderStandings() {
   renderConferenceStandings(1, 'nfcStandings');
 }
 
+
+function renderStandingsPreview() {
+  const container = document.getElementById('standingsPreview');
+  if (!container) return;
+
+  const rows = state.standings.slice().sort((a, b) => {
+    const rankA = a.overallRank == null ? 999 : Number(a.overallRank);
+    const rankB = b.overallRank == null ? 999 : Number(b.overallRank);
+    return rankA - rankB;
+  });
+
+  const previewRows = rows.length >= 4 ? [rows[0], rows[1], rows[2], rows[rows.length - 1]] : rows;
+
+  if (!previewRows.length) {
+    container.innerHTML = '<div class="error-panel">Standings preview is not available yet.</div>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="standings-preview-head">
+      <span>Team</span>
+      <span>W-L</span>
+      <span>PF</span>
+    </div>
+    ${previewRows.map((row, index) => {
+      const team = state.teamMap.get(Number(row.teamId));
+      const rankLabel = row.overallRank == null ? (index === previewRows.length - 1 && previewRows.length > 3 ? state.teams.length : '--') : row.overallRank;
+      return `
+        <div class="standings-preview-row ${index === 0 ? 'is-top' : ''}">
+          <div class="standings-preview-teamwrap">
+            <div class="standings-preview-rank">${escapeHtml(String(rankLabel))}</div>
+            <img class="standing-logo custom-team-icon ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
+            <div class="standing-name">
+              <strong>${escapeHtml(row.teamName)}</strong>
+              <span>${escapeHtml(team ? ownerText(team) : '')}</span>
+            </div>
+          </div>
+          <div class="standings-mini-record">${row.wins}-${row.losses}</div>
+          <div class="standings-mini-pf">${number2(row.pointsFor)}</div>
+        </div>
+      `;
+    }).join('')}
+  `;
+}
+
+function renderGlanceRibbon() {
+  const container = document.getElementById('glanceRibbon');
+  if (!container || !state.league) return;
+
+  const afcTeams = state.teams.filter(team => Number(team.divisionId) === 0).length;
+  const nfcTeams = state.teams.filter(team => Number(team.divisionId) === 1).length;
+
+  const items = [
+    ['At a Glance', '', ''],
+    ['👥', state.league.teamCount, 'Teams'],
+    ['🅰️', afcTeams, 'AFC Teams'],
+    ['🅽', nfcTeams, 'NFC Teams'],
+    ['📅', state.league.regularSeasonWeeks, 'Regular Season Weeks'],
+    ['🏆', state.league.playoffTeams, 'Playoff Spots']
+  ];
+
+  container.innerHTML = items.map((item, index) => {
+    if (index === 0) {
+      return `<div class="glance-item glance-label"><span class="section-kicker">${item[0]}</span></div>`;
+    }
+    return `
+      <div class="glance-item">
+        <span class="glance-icon">${item[0]}</span>
+        <strong>${escapeHtml(String(item[1]))}</strong>
+        <small>${escapeHtml(item[2])}</small>
+      </div>
+    `;
+  }).join('');
+}
+
 function renderConferenceStandings(divisionId, targetId) {
   const target = document.getElementById(targetId);
 
@@ -778,7 +1239,7 @@ async function openTeamModal(teamId) {
 function renderFatalError(error) {
   const message = escapeHtml(error.message || String(error));
 
-  ['featuredMatchup', 'leaguePulse', 'matchupGrid', 'battleFeatured', 'battleGrid'].forEach(id => {
+  ['featuredMatchup', 'leaguePulse', 'overviewTopStats', 'overviewMatchups', 'battleFeatured', 'battleGrid', 'standingsPreview', 'championSpotlight'].forEach(id => {
     const element = document.getElementById(id);
     if (element) element.innerHTML = `<div class="error-panel">${message}</div>`;
   });
