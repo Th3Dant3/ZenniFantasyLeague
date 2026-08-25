@@ -84,6 +84,7 @@
         <button class="nav-tab battle-nav" type="button" data-tab="battle">Battle Center</button>
         <button class="nav-tab" type="button" data-tab="standings">Standings</button>
         <button class="nav-tab" type="button" data-tab="teams">Teams</button>
+        <button class="nav-tab draft-nav" type="button" data-tab="draft">Draft Day</button>
       </nav>
 
       <div class="live-pill" id="apiStatus">
@@ -97,6 +98,7 @@
       <button class="mobile-tab battle-nav" type="button" data-tab="battle">⚔ Battle</button>
       <button class="mobile-tab" type="button" data-tab="standings">Standings</button>
       <button class="mobile-tab" type="button" data-tab="teams">Teams</button>
+      <button class="mobile-tab draft-nav" type="button" data-tab="draft">Draft</button>
     </div>
 
     <main id="top">
@@ -329,6 +331,69 @@
           </div>
 
           <div class="team-grid" id="teamGrid"></div>
+        </section>
+      </section>
+
+      <section class="view-panel draft-view" data-view="draft">
+        <section class="draft-night-shell">
+          <header class="draft-night-hero">
+            <div class="draft-night-copy">
+              <span class="section-kicker">2026 Zenni League</span>
+              <h1>DRAFT NIGHT</h1>
+              <p id="draftDateLabel">Loading the official ESPN draft schedule...</p>
+              <div class="draft-status-pill" id="draftStatusPill">PRE-DRAFT</div>
+            </div>
+
+            <div class="draft-countdown" id="draftCountdown">
+              <div><strong id="draftDays">--</strong><span>Days</span></div>
+              <div><strong id="draftHours">--</strong><span>Hours</span></div>
+              <div><strong id="draftMinutes">--</strong><span>Minutes</span></div>
+              <div><strong id="draftSeconds">--</strong><span>Seconds</span></div>
+            </div>
+          </header>
+
+          <section class="draft-info-strip">
+            <div><span>Format</span><strong id="draftType">Snake</strong></div>
+            <div><span>Teams</span><strong id="draftTeamCount">12</strong></div>
+            <div><span>Pick Timer</span><strong id="draftPickTimer">90 sec</strong></div>
+            <div><span>Rounds</span><strong id="draftRounds">17</strong></div>
+            <div><span>Draft Slots</span><strong id="draftSlots">204</strong></div>
+          </section>
+
+          <section class="draft-order-section">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">Official ESPN Order</span>
+                <h2>Round 1 Draft Order</h2>
+              </div>
+              <span class="week-chip" id="draftLockLabel">Loading...</span>
+            </div>
+            <div class="draft-order-grid skeleton-block" id="draftOrderGrid"></div>
+          </section>
+
+          <section class="draft-board-section">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">Snake Draft Board</span>
+                <h2>Live Pick Board</h2>
+              </div>
+              <span class="muted" id="draftRankingSource">ESPN ADP ranking</span>
+            </div>
+            <div class="draft-round-tabs" id="draftRoundTabs"></div>
+            <div class="draft-pick-board" id="draftPickBoard"></div>
+          </section>
+
+          <section class="draft-recap-section">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">Team Draft Recap</span>
+                <h2>Who Did Each Team Pick?</h2>
+              </div>
+              <span class="muted">Select a team to review every selection</span>
+            </div>
+            <div class="draft-team-selector" id="draftTeamSelector"></div>
+            <div class="draft-team-recap" id="draftTeamRecap"></div>
+          </section>
         </section>
       </section>
     </main>

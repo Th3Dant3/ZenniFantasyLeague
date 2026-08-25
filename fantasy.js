@@ -63,7 +63,11 @@ const state = {
   weekCache: new Map(),
   playerPerformanceCache: new Map(),
   performerRequestToken: 0,
-  activeView: 'overview'
+  activeView: 'overview',
+  draft: null,
+  draftCountdownTimer: null,
+  draftRound: 1,
+  draftSelectedTeamId: null
 };
 
 document.addEventListener('DOMContentLoaded', init);
@@ -74,7 +78,10 @@ async function init() {
 
   try {
     setLoaderTarget(22);
-    const data = await jsonp('league');
+    const [data, draftData] = await Promise.all([
+      jsonp('league'),
+      jsonp('draftboard').catch(error => ({ ok: false, error: error.message }))
+    ]);
 
     if (!data || !data.ok) {
       throw new Error(data && data.error ? data.error : 'League API did not return data.');
@@ -82,6 +89,7 @@ async function init() {
 
     setLoaderTarget(58);
     hydrateState(data);
+    hydrateDraftState(draftData);
 
     setLoaderTarget(78);
     renderAll();
@@ -224,7 +232,7 @@ function bindUi() {
 }
 
 function switchView(view) {
-  const nextView = ['overview', 'battle', 'standings', 'teams'].includes(view)
+  const nextView = ['overview', 'battle', 'standings', 'teams', 'draft'].includes(view)
     ? view
     : 'overview';
 
@@ -244,6 +252,10 @@ function switchView(view) {
 
   if (nextView === 'battle') {
     animateBattleEntrance();
+  }
+
+  if (nextView === 'draft') {
+    renderDraftDay();
   }
 }
 
@@ -272,6 +284,309 @@ function hydrateState(data) {
   document.getElementById('heroSubtext').textContent = preseason
     ? 'The field is set. Twelve teams. One Zenni Cup.'
     : `Live through Week ${state.league.latestScoringPeriod}.`;
+}
+
+function hydrateDraftState(data) {
+  if (!data || !data.ok) {
+    state.draft = null;
+    return;
+  }
+
+  // API may return either {draft:{...}} or the normalized draft object directly.
+  state.draft = data.draft && data.draft.order ? data.draft : data;
+  state.draftRanking = data.ranking || null;
+
+  const source = document.getElementById('draftRankingSource');
+  if (source) {
+    source.textContent = state.draftRanking && state.draftRanking.rankType
+      ? `ESPN ${state.draftRanking.rankType} ADP ranking`
+      : 'ESPN ADP ranking';
+  }
+
+  renderDraftDay();
+}
+
+function renderDraftDay() {
+  const grid = document.getElementById('draftOrderGrid');
+  if (!grid) return;
+
+  const draft = state.draft;
+  if (!draft) {
+    grid.classList.remove('skeleton-block');
+    grid.innerHTML = '<div class="draft-error">Draft data is not available from ESPN yet.</div>';
+    return;
+  }
+
+  const order = Array.isArray(draft.order) ? draft.order : [];
+  const picks = Array.isArray(draft.picks) ? draft.picks : [];
+  const date = draft.dateIso ? new Date(draft.dateIso) : null;
+
+  const dateLabel = document.getElementById('draftDateLabel');
+  if (dateLabel) dateLabel.textContent = draft.dateLocal || (date ? date.toLocaleString() : 'Draft schedule pending');
+
+  setText('draftType', draft.type || 'SNAKE');
+  setText('draftTeamCount', draft.teamCount || order.length || 12);
+  setText('draftPickTimer', draft.secondsPerPick ? `${draft.secondsPerPick} sec` : '—');
+  setText('draftSlots', draft.totalPickSlots || picks.length || '—');
+
+  const rounds = draft.rounds || ((draft.totalPickSlots && draft.teamCount) ? Math.ceil(draft.totalPickSlots / draft.teamCount) : null);
+  setText('draftRounds', rounds || '—');
+  setText('draftLockLabel', draft.orderLocked ? 'Order Locked' : 'Order Pending');
+
+  updateDraftStatus(draft.status || 'PRE_DRAFT');
+  startDraftCountdown(date, draft.status || 'PRE_DRAFT');
+
+  grid.classList.remove('skeleton-block');
+  grid.innerHTML = order.map(entry => {
+    const team = state.teamMap.get(Number(entry.teamId));
+    const displayTeam = team || { id: entry.teamId, name: entry.teamName, owners: entry.owners || [], logo: '' };
+    const isChampion = !!(team && team.defendingChampion);
+    return `
+      <article class="draft-order-card ${isChampion ? 'is-champion' : ''}">
+        <div class="draft-pick-number"><small>Pick</small><strong>${entry.pick}</strong></div>
+        <img class="draft-team-art ${teamIconClass(displayTeam)}" src="${escapeAttr(getTeamIcon(displayTeam))}" alt="${escapeAttr(displayTeam.name)} mascot" ${teamIconFallbackAttr(displayTeam)}>
+        <div class="draft-team-copy">
+          <span>${isChampion ? 'Defending Champion' : '2026 Draft Position'}</span>
+          <h3>${escapeHtml(displayTeam.name || entry.teamName)}</h3>
+          <p>${escapeHtml(ownerText(displayTeam))}</p>
+        </div>
+      </article>`;
+  }).join('');
+
+  renderDraftBoard(picks, rounds || 1);
+}
+
+function renderDraftBoard(picks, rounds) {
+  const tabs = document.getElementById('draftRoundTabs');
+  const board = document.getElementById('draftPickBoard');
+  if (!tabs || !board) return;
+
+  const maxRound = Math.max(1, Math.min(Number(rounds || 1), 17));
+  state.draftRound = Math.max(1, Math.min(state.draftRound || 1, maxRound));
+
+  tabs.innerHTML = Array.from({ length: maxRound }, (_, index) => {
+    const round = index + 1;
+    return `<button type="button" class="draft-round-button ${round === state.draftRound ? 'is-active' : ''}" data-draft-round="${round}">R${round}</button>`;
+  }).join('');
+
+  tabs.querySelectorAll('[data-draft-round]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.draftRound = Number(button.dataset.draftRound);
+      renderDraftBoard(picks, maxRound);
+    });
+  });
+
+  const roundPicks = picks.filter(pick => Number(pick.round) === Number(state.draftRound));
+
+  board.innerHTML = roundPicks.map(pick => {
+    const team = state.teamMap.get(Number(pick.teamId));
+    const displayTeam = team || { id: pick.teamId, name: pick.teamName, owners: [], logo: '' };
+
+    if (!pick.completed) {
+      return `
+        <article class="draft-slot">
+          <div class="draft-slot-pick">${pick.overallPick}</div>
+          <img src="${escapeAttr(getTeamIcon(displayTeam))}" alt="" ${teamIconFallbackAttr(displayTeam)}>
+          <div class="draft-slot-team">
+            <strong>${escapeHtml(displayTeam.name || pick.teamName)}</strong>
+            <span>Waiting for draft</span>
+          </div>
+        </article>`;
+    }
+
+    const player = pick.player || {};
+    const resolvedRank = pick.resolvedDraftRank != null ? Number(pick.resolvedDraftRank) : null;
+    const positionRank = pick.positionRank != null ? Number(pick.positionRank) : null;
+    const adp = pick.espnAdp != null ? Number(pick.espnAdp) : null;
+    const value = pick.valueVsEspnRank != null ? Number(pick.valueVsEspnRank) : null;
+
+    return `
+      <article class="draft-slot is-complete">
+        <div class="draft-slot-pick">${pick.overallPick}</div>
+
+        <img src="${escapeAttr(getTeamIcon(displayTeam))}" alt="" ${teamIconFallbackAttr(displayTeam)}>
+
+        <div class="draft-slot-team">
+          <strong>${escapeHtml(displayTeam.name || pick.teamName)}</strong>
+          <span>${escapeHtml(pick.playerName || player.name || 'Selected')}</span>
+        </div>
+
+        <div class="draft-player-details">
+          <div class="draft-player-main">
+            <strong>${escapeHtml(pick.playerName || player.name || 'Selected')}</strong>
+            <span>
+              ${escapeHtml(pick.position || player.position || '')}
+              ${positionRank != null ? ` • ${escapeHtml((pick.position || player.position || 'POS') + positionRank)}` : ''}
+            </span>
+          </div>
+
+          <div class="draft-player-metrics">
+            <span>
+              <small>ESPN ADP</small>
+              <strong>${adp != null ? adp.toFixed(2) : '—'}</strong>
+            </span>
+            <span>
+              <small>ADP Rank</small>
+              <strong>${resolvedRank != null ? '#' + resolvedRank : '—'}</strong>
+            </span>
+            <span>
+              <small>Drafted</small>
+              <strong>#${pick.overallPick}</strong>
+            </span>
+          </div>
+
+          <div class="draft-value-badge ${draftValueClass(pick.valueLabel)}">
+            ${escapeHtml(pick.valueLabel || 'PICKED')}
+            ${value != null ? `<b>${value > 0 ? '+' : ''}${value}</b>` : ''}
+          </div>
+        </div>
+      </article>`;
+  }).join('') || '<div class="draft-error">ESPN has not returned pick slots for this round.</div>';
+
+  renderDraftTeamSelector(picks);
+  renderDraftTeamRecap(picks);
+}
+
+function draftValueClass(label) {
+  const value = String(label || '').toUpperCase();
+  if (value.includes('STEAL')) return 'is-steal';
+  if (value.includes('REACH')) return 'is-reach';
+  if (value.includes('VALUE')) return 'is-value';
+  return '';
+}
+
+function renderDraftTeamSelector(picks) {
+  const container = document.getElementById('draftTeamSelector');
+  if (!container) return;
+
+  if (!state.draftSelectedTeamId && state.draft && Array.isArray(state.draft.order) && state.draft.order.length) {
+    state.draftSelectedTeamId = Number(state.draft.order[0].teamId);
+  }
+
+  container.innerHTML = (state.draft.order || []).map(entry => {
+    const team = state.teamMap.get(Number(entry.teamId));
+    const displayTeam = team || { id: entry.teamId, name: entry.teamName, owners: entry.owners || [], logo: '' };
+    const active = Number(state.draftSelectedTeamId) === Number(entry.teamId);
+
+    return `
+      <button type="button" class="draft-team-chip ${active ? 'is-active' : ''}" data-draft-team="${entry.teamId}">
+        <img src="${escapeAttr(getTeamIcon(displayTeam))}" alt="" ${teamIconFallbackAttr(displayTeam)}>
+        <span>${escapeHtml(displayTeam.name || entry.teamName)}</span>
+      </button>`;
+  }).join('');
+
+  container.querySelectorAll('[data-draft-team]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.draftSelectedTeamId = Number(button.dataset.draftTeam);
+      renderDraftTeamSelector(picks);
+      renderDraftTeamRecap(picks);
+    });
+  });
+}
+
+function renderDraftTeamRecap(picks) {
+  const container = document.getElementById('draftTeamRecap');
+  if (!container) return;
+
+  const teamId = Number(state.draftSelectedTeamId || 0);
+  if (!teamId) {
+    container.innerHTML = '<div class="draft-error">Select a team to view its draft.</div>';
+    return;
+  }
+
+  const team = state.teamMap.get(teamId);
+  const orderEntry = (state.draft.order || []).find(entry => Number(entry.teamId) === teamId);
+  const displayTeam = team || {
+    id: teamId,
+    name: orderEntry ? orderEntry.teamName : `Team ${teamId}`,
+    owners: orderEntry ? orderEntry.owners || [] : [],
+    logo: ''
+  };
+
+  const teamPicks = (picks || []).filter(pick => Number(pick.teamId) === teamId);
+
+  container.innerHTML = `
+    <div class="draft-recap-header">
+      <img src="${escapeAttr(getTeamIcon(displayTeam))}" alt="${escapeAttr(displayTeam.name)}" ${teamIconFallbackAttr(displayTeam)}>
+      <div>
+        <span class="section-kicker">2026 Draft Recap</span>
+        <h3>${escapeHtml(displayTeam.name)}</h3>
+        <p>${escapeHtml(ownerText(displayTeam))}</p>
+      </div>
+    </div>
+
+    <div class="draft-recap-table">
+      <div class="draft-recap-row draft-recap-head">
+        <span>Round</span>
+        <span>Pick</span>
+        <span>Player</span>
+        <span>Pos</span>
+        <span>ESPN ADP</span>
+        <span>ADP Rank</span>
+        <span>Value</span>
+      </div>
+
+      ${teamPicks.map(pick => `
+        <div class="draft-recap-row ${pick.completed ? 'is-complete' : ''}">
+          <span>${pick.round}</span>
+          <span>#${pick.overallPick}</span>
+          <span class="recap-player">${pick.completed ? escapeHtml(pick.playerName || (pick.player && pick.player.name) || 'Selected') : 'Waiting'}</span>
+          <span>${pick.completed ? escapeHtml(pick.position || (pick.player && pick.player.position) || '—') : '—'}</span>
+          <span>${pick.completed && pick.espnAdp != null ? Number(pick.espnAdp).toFixed(2) : '—'}</span>
+          <span>${pick.completed && pick.resolvedDraftRank != null ? '#' + pick.resolvedDraftRank : '—'}</span>
+          <span class="${pick.completed ? draftValueClass(pick.valueLabel) : ''}">
+            ${pick.completed ? escapeHtml(pick.valueLabel || 'PICKED') : '—'}
+          </span>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
+function startDraftCountdown(date, status) {
+  if (state.draftCountdownTimer) {
+    window.clearInterval(state.draftCountdownTimer);
+    state.draftCountdownTimer = null;
+  }
+
+  const tick = () => {
+    if (!date || Number.isNaN(date.getTime())) return;
+    const diff = date.getTime() - Date.now();
+
+    if (diff <= 0) {
+      setText('draftDays', '00');
+      setText('draftHours', '00');
+      setText('draftMinutes', '00');
+      setText('draftSeconds', '00');
+      updateDraftStatus(status === 'COMPLETE' ? 'COMPLETE' : status === 'LIVE' ? 'LIVE' : 'STARTING');
+      return;
+    }
+
+    const days = Math.floor(diff / 86400000);
+    const hours = Math.floor((diff % 86400000) / 3600000);
+    const minutes = Math.floor((diff % 3600000) / 60000);
+    const seconds = Math.floor((diff % 60000) / 1000);
+
+    setText('draftDays', String(days).padStart(2, '0'));
+    setText('draftHours', String(hours).padStart(2, '0'));
+    setText('draftMinutes', String(minutes).padStart(2, '0'));
+    setText('draftSeconds', String(seconds).padStart(2, '0'));
+  };
+
+  tick();
+  state.draftCountdownTimer = window.setInterval(tick, 1000);
+}
+
+function updateDraftStatus(status) {
+  const pill = document.getElementById('draftStatusPill');
+  if (!pill) return;
+  const normalized = String(status || 'PRE_DRAFT').toUpperCase();
+  pill.className = `draft-status-pill status-${normalized.toLowerCase().replaceAll('_', '-')}`;
+  pill.textContent = normalized === 'PRE_DRAFT' ? 'PRE-DRAFT' : normalized.replaceAll('_', ' ');
+}
+
+function setText(id, value) {
+  const element = document.getElementById(id);
+  if (element) element.textContent = value;
 }
 
 function renderAll() {
