@@ -4866,3 +4866,278 @@ main {
     flex-basis: 145px;
   }
 }
+
+
+/* =========================================================
+   STAGE 4 — BATTLE CENTER LIVE FIGHT ANIMATION
+   ========================================================= */
+
+.motw-stage {
+  --fight-left-charge: 23%;
+  --fight-right-charge: -23%;
+  --fight-recoil-left: -8%;
+  --fight-recoil-right: 8%;
+}
+
+.motw-stage .battle-fighter,
+.motw-stage .battle-mascot,
+.motw-stage .battle-impact {
+  will-change: transform, filter, opacity;
+}
+
+/* Stare-down: subtle lean toward center before the charge. */
+.motw-stage.fight-staredown .battle-fighter-left .battle-mascot {
+  animation: battleStareLeft .85s cubic-bezier(.2,.8,.2,1) both;
+}
+
+.motw-stage.fight-staredown .battle-fighter-right .battle-mascot {
+  animation: battleStareRight .85s cubic-bezier(.2,.8,.2,1) both;
+}
+
+/* Charge: both mascots attack toward center at the same time. */
+.motw-stage.fight-charge .battle-fighter-left .battle-mascot {
+  animation: battleChargeLeft .52s cubic-bezier(.18,.88,.22,1) both;
+}
+
+.motw-stage.fight-charge .battle-fighter-right .battle-mascot {
+  animation: battleChargeRight .52s cubic-bezier(.18,.88,.22,1) both;
+}
+
+/* Impact: brief compression + center shake, then flash. */
+.motw-stage.fight-impact .battle-fighter-left .battle-mascot {
+  animation: battleImpactLeft .32s cubic-bezier(.2,.9,.28,1) both;
+}
+
+.motw-stage.fight-impact .battle-fighter-right .battle-mascot {
+  animation: battleImpactRight .32s cubic-bezier(.2,.9,.28,1) both;
+}
+
+.motw-stage.fight-impact .battle-impact {
+  animation: battleImpactCore .32s ease-out both;
+}
+
+/* Recoil away from collision. */
+.motw-stage.fight-recoil .battle-fighter-left .battle-mascot {
+  animation: battleRecoilLeft .56s cubic-bezier(.17,.75,.25,1) both;
+}
+
+.motw-stage.fight-recoil .battle-fighter-right .battle-mascot {
+  animation: battleRecoilRight .56s cubic-bezier(.17,.75,.25,1) both;
+}
+
+/* Reset smoothly back to idle position. */
+.motw-stage.fight-reset .battle-fighter-left .battle-mascot,
+.motw-stage.fight-reset .battle-fighter-right .battle-mascot {
+  animation: battleReset .65s ease both;
+}
+
+/* Extra impact rings created visually from existing center element. */
+.battle-impact {
+  position: relative;
+}
+
+.battle-impact::before,
+.battle-impact::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 88px;
+  height: 88px;
+  border: 2px solid rgba(255,255,255,.72);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(.4);
+}
+
+.battle-impact.impact-burst::before {
+  animation: battleShockwave .75s ease-out forwards;
+}
+
+.battle-impact.impact-burst::after {
+  animation: battleShockwave .75s .09s ease-out forwards;
+}
+
+.battle-impact.impact-burst strong {
+  animation: battleVsFlash .58s ease-out both;
+}
+
+.motw-stage.fight-impact::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  width: 170px;
+  height: 170px;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    radial-gradient(circle,
+      rgba(255,255,255,.78) 0 4%,
+      rgba(245,183,40,.42) 12%,
+      rgba(75,181,255,.18) 30%,
+      transparent 68%);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(.45);
+  animation: battleImpactFlash .36s ease-out both;
+}
+
+/* Keep normal idle motion outside active fight phases. */
+.motw-stage:not(.fight-staredown):not(.fight-charge):not(.fight-impact):not(.fight-recoil):not(.fight-reset)
+.battle-mascot {
+  animation: arenaIdle 4.4s ease-in-out infinite;
+}
+
+@keyframes battleStareLeft {
+  0%   { transform: translateX(0) rotate(-1deg) scale(1); }
+  100% { transform: translateX(4%) rotate(2deg) scale(1.035); }
+}
+
+@keyframes battleStareRight {
+  0%   { transform: translateX(0) rotate(1deg) scale(1); }
+  100% { transform: translateX(-4%) rotate(-2deg) scale(1.035); }
+}
+
+@keyframes battleChargeLeft {
+  0% {
+    transform: translateX(4%) rotate(2deg) scale(1.035);
+    filter: drop-shadow(0 20px 22px rgba(0,0,0,.46));
+  }
+  72% {
+    transform: translateX(var(--fight-left-charge)) rotate(8deg) scale(1.10);
+    filter:
+      drop-shadow(0 20px 22px rgba(0,0,0,.5))
+      drop-shadow(20px 0 16px rgba(75,181,255,.35));
+  }
+  100% {
+    transform: translateX(calc(var(--fight-left-charge) + 2%)) rotate(4deg) scale(1.08);
+  }
+}
+
+@keyframes battleChargeRight {
+  0% {
+    transform: translateX(-4%) rotate(-2deg) scale(1.035);
+    filter: drop-shadow(0 20px 22px rgba(0,0,0,.46));
+  }
+  72% {
+    transform: translateX(var(--fight-right-charge)) rotate(-8deg) scale(1.10);
+    filter:
+      drop-shadow(0 20px 22px rgba(0,0,0,.5))
+      drop-shadow(-20px 0 16px rgba(255,90,111,.30));
+  }
+  100% {
+    transform: translateX(calc(var(--fight-right-charge) - 2%)) rotate(-4deg) scale(1.08);
+  }
+}
+
+@keyframes battleImpactLeft {
+  0%   { transform: translateX(calc(var(--fight-left-charge) + 2%)) rotate(4deg) scale(1.08); }
+  45%  { transform: translateX(calc(var(--fight-left-charge) + 5%)) rotate(7deg) scale(.98); }
+  100% { transform: translateX(var(--fight-left-charge)) rotate(3deg) scale(1.04); }
+}
+
+@keyframes battleImpactRight {
+  0%   { transform: translateX(calc(var(--fight-right-charge) - 2%)) rotate(-4deg) scale(1.08); }
+  45%  { transform: translateX(calc(var(--fight-right-charge) - 5%)) rotate(-7deg) scale(.98); }
+  100% { transform: translateX(var(--fight-right-charge)) rotate(-3deg) scale(1.04); }
+}
+
+@keyframes battleImpactCore {
+  0%   { transform: scale(1); }
+  24%  { transform: scale(1.15) rotate(-4deg); }
+  50%  { transform: scale(.93) rotate(4deg); }
+  76%  { transform: scale(1.08) rotate(-2deg); }
+  100% { transform: scale(1); }
+}
+
+@keyframes battleRecoilLeft {
+  0%   { transform: translateX(var(--fight-left-charge)) rotate(3deg) scale(1.04); }
+  40%  { transform: translateX(var(--fight-recoil-left)) rotate(-7deg) scale(.96); }
+  100% { transform: translateX(-3%) rotate(-2deg) scale(1); }
+}
+
+@keyframes battleRecoilRight {
+  0%   { transform: translateX(var(--fight-right-charge)) rotate(-3deg) scale(1.04); }
+  40%  { transform: translateX(var(--fight-recoil-right)) rotate(7deg) scale(.96); }
+  100% { transform: translateX(3%) rotate(2deg) scale(1); }
+}
+
+@keyframes battleReset {
+  from { transform: translateX(0) translateY(2px) scale(.99); }
+  to   { transform: translateX(0) translateY(0) scale(1); }
+}
+
+@keyframes battleShockwave {
+  0% {
+    opacity: .78;
+    transform: translate(-50%, -50%) scale(.35);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(2.1);
+  }
+}
+
+@keyframes battleVsFlash {
+  0%   { transform: scale(1); filter: brightness(1); }
+  28%  { transform: scale(1.34); filter: brightness(2.1); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+
+@keyframes battleImpactFlash {
+  0% {
+    opacity: .95;
+    transform: translate(-50%, -50%) scale(.35);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.5);
+  }
+}
+
+/* Mobile: shorter charge so the vertically stacked fighters do not leave their cards. */
+@media (max-width: 760px) {
+  .motw-stage {
+    --fight-left-charge: 0%;
+    --fight-right-charge: 0%;
+    --fight-recoil-left: 0%;
+    --fight-recoil-right: 0%;
+  }
+
+  .motw-stage.fight-charge .battle-fighter-left .battle-mascot {
+    animation: battleMobileAttackUp .5s ease-out both;
+  }
+
+  .motw-stage.fight-charge .battle-fighter-right .battle-mascot {
+    animation: battleMobileAttackDown .5s ease-out both;
+  }
+
+  @keyframes battleMobileAttackUp {
+    0%   { transform: translateY(0) scale(1); }
+    70%  { transform: translateY(10px) scale(1.06); }
+    100% { transform: translateY(6px) scale(1.03); }
+  }
+
+  @keyframes battleMobileAttackDown {
+    0%   { transform: translateY(0) scale(1); }
+    70%  { transform: translateY(-10px) scale(1.06); }
+    100% { transform: translateY(-6px) scale(1.03); }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motw-stage .battle-mascot,
+  .motw-stage .battle-fighter,
+  .motw-stage .battle-impact,
+  .battle-impact::before,
+  .battle-impact::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .motw-stage.fight-impact::after {
+    display: none;
+  }
+}
+

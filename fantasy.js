@@ -1,6 +1,69 @@
 const API_URL =
   'https://script.google.com/macros/s/AKfycbzKMV9Vy3fq2UQlT8Z5Ll67gsEieLE1EhrFQ13hnENcNzp2FOX-2lBv402tSvivKeriOg/exec';
 
+const FantasyPerf = (() => {
+  const navStart = performance.timeOrigin || Date.now();
+  let seq = 0;
+
+  function nowFromNav() {
+    return performance.now();
+  }
+
+  function log(message, data = {}) {
+    console.log(`[FantasyPerf] ${message}`, data);
+  }
+
+  function start(label, data = {}) {
+    const id = ++seq;
+    const started = performance.now();
+
+    log(`▶ ${label} #${id}`, data);
+
+    return {
+      id,
+      end(extra = {}) {
+        const durationMs = performance.now() - started;
+        log(`✓ ${label} #${id}: ${durationMs.toFixed(1)} ms`, {
+          durationMs: Number(durationMs.toFixed(1)),
+          ...extra
+        });
+        return durationMs;
+      },
+      fail(error, extra = {}) {
+        const durationMs = performance.now() - started;
+        log(`✗ ${label} #${id}: ${durationMs.toFixed(1)} ms`, {
+          durationMs: Number(durationMs.toFixed(1)),
+          error: error && error.message ? error.message : String(error),
+          ...extra
+        });
+        return durationMs;
+      }
+    };
+  }
+
+  return {
+    log,
+    start,
+    nowFromNav
+  };
+})();
+
+FantasyPerf.log(
+  `JS executing at ${FantasyPerf.nowFromNav().toFixed(1)} ms after navigation start`
+);
+
+document.addEventListener('DOMContentLoaded', () => {
+  FantasyPerf.log(
+    `DOMContentLoaded fired at ${FantasyPerf.nowFromNav().toFixed(1)} ms after navigation start`
+  );
+}, { once: true });
+
+window.addEventListener('load', () => {
+  FantasyPerf.log(
+    `window.load at ${FantasyPerf.nowFromNav().toFixed(1)} ms after navigation start`
+  );
+}, { once: true });
+
 const CUSTOM_TEAM_ICONS = Object.freeze({
   1: 'assets/teams/main-event-dante.png',
   2: 'assets/teams/iambad2.png',
@@ -27,6 +90,10 @@ const CUSTOM_TEAM_ICONS = Object.freeze({
  */
 
 const LOADER_MINIMUM_MS = 1600;
+const LEAGUE_BROWSER_CACHE_KEY = 'ZENNI_FANTASY_LEAGUE_LAST_GOOD_V1';
+const LEAGUE_BROWSER_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const LEAGUE_RETRY_DELAYS_MS = [1200, 2800];
+
 const loaderState = {
   startedAt: Date.now(),
   progress: 0,
@@ -53,6 +120,13 @@ const MATCHUP_STORYLINES = Object.freeze({
   }
 });
 
+const battleAnimationState = {
+  timer: null,
+  sequenceTimer: null,
+  activeStage: null,
+  cycle: 0
+};
+
 const state = {
   league: null,
   teams: [],
@@ -73,36 +147,291 @@ const state = {
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+  const audit = FantasyPerf.start('INITIAL init');
+
   bindUi();
   startLeagueLoader();
 
   try {
     setLoaderTarget(22);
-    const [data, draftData] = await Promise.all([
-      jsonp('league'),
-      jsonp('draftboard').catch(error => ({ ok: false, error: error.message }))
-    ]);
+
+    const leagueAudit = FantasyPerf.start('Startup league resilient');
+
+    let data = null;
+    let source = 'live';
+
+    try {
+      data = await jsonpWithRetry_('league', {}, LEAGUE_RETRY_DELAYS_MS);
+
+      if (data && data.ok) {
+        saveLeagueBrowserCache_(data);
+      }
+
+    } catch (liveError) {
+      const cached = loadLeagueBrowserCache_();
+
+      if (cached && cached.data && cached.data.ok) {
+        data = cached.data;
+        source = 'browser-cache';
+
+        FantasyPerf.log(
+          'League live request failed; using last-good browser cache',
+          {
+            cacheAgeMs: cached.ageMs,
+            error: liveError.message
+          }
+        );
+
+        setApiStatus(false, 'Cached Data · Reconnecting');
+
+        refreshLeagueInBackground_();
+
+      } else {
+        throw liveError;
+      }
+    }
+
+    leagueAudit.end({
+      leagueOk: Boolean(data && data.ok),
+      source
+    });
 
     if (!data || !data.ok) {
-      throw new Error(data && data.error ? data.error : 'League API did not return data.');
+      throw new Error(
+        data && data.error
+          ? data.error
+          : 'League API did not return data.'
+      );
     }
 
     setLoaderTarget(58);
+
+    const hydrateAudit = FantasyPerf.start('Hydrate league state');
+
     hydrateState(data);
-    hydrateDraftState(draftData);
+
+    hydrateAudit.end({
+      teams: state.teams.length,
+      standings: state.standings.length,
+      currentMatchups: state.currentMatchups.length,
+      source
+    });
 
     setLoaderTarget(78);
+
+    const renderAudit = FantasyPerf.start('Initial renderAll');
+
     renderAll();
 
+    renderAudit.end();
+
     setLoaderTarget(94);
-    setApiStatus(true, 'ESPN Connected');
+
+    if (source === 'live') {
+      setApiStatus(true, 'ESPN Connected');
+    }
+
+    const loaderAudit = FantasyPerf.start('Finish loader success');
 
     await finishLeagueLoader(true);
+
+    loaderAudit.end();
+
+    audit.end({
+      success: true,
+      teams: state.teams.length,
+      currentWeek: state.selectedWeek,
+      source
+    });
+
+    FantasyPerf.log(
+      `MAIN FANTASY PAGE TIME TO READY: ${FantasyPerf.nowFromNav().toFixed(1)} ms (${(FantasyPerf.nowFromNav() / 1000).toFixed(2)} sec)`,
+      { source }
+    );
+
+    loadDraftboardInBackground_();
+
   } catch (error) {
     console.error(error);
+
     setApiStatus(false, 'API Error');
     renderFatalError(error);
+
+    const loaderAudit = FantasyPerf.start('Finish loader error');
+
     await finishLeagueLoader(false);
+
+    loaderAudit.end();
+
+    audit.fail(error, {
+      success: false
+    });
+
+    FantasyPerf.log(
+      `FANTASY PAGE FAILED AFTER: ${FantasyPerf.nowFromNav().toFixed(1)} ms (${(FantasyPerf.nowFromNav() / 1000).toFixed(2)} sec)`
+    );
+  }
+}
+
+async function jsonpWithRetry_(mode, params = {}, retryDelays = []) {
+  let lastError = null;
+  const delays = Array.isArray(retryDelays) ? retryDelays : [];
+
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      FantasyPerf.log(`JSONP ${mode} attempt ${attempt + 1}`, {
+        attempt: attempt + 1,
+        maxAttempts: delays.length + 1,
+        params
+      });
+
+      return await jsonp(mode, params);
+
+    } catch (error) {
+      lastError = error;
+
+      FantasyPerf.log(`JSONP ${mode} attempt ${attempt + 1} failed`, {
+        attempt: attempt + 1,
+        error: error && error.message ? error.message : String(error)
+      });
+
+      if (attempt >= delays.length) {
+        break;
+      }
+
+      const delayMs = Number(delays[attempt] || 0);
+      if (delayMs > 0) await wait(delayMs);
+    }
+  }
+
+  throw lastError || new Error(`Unable to load ${mode}.`);
+}
+
+function saveLeagueBrowserCache_(data) {
+  try {
+    localStorage.setItem(
+      LEAGUE_BROWSER_CACHE_KEY,
+      JSON.stringify({
+        savedAt: Date.now(),
+        data
+      })
+    );
+
+    FantasyPerf.log('Saved last-good league browser cache', {
+      teams: Array.isArray(data && data.teams) ? data.teams.length : 0,
+      currentWeek: data && data.league ? data.league.currentWeek : null
+    });
+
+  } catch (error) {
+    console.warn('Unable to save Fantasy league browser cache:', error);
+  }
+}
+
+function loadLeagueBrowserCache_() {
+  try {
+    const raw = localStorage.getItem(LEAGUE_BROWSER_CACHE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    const savedAt = Number(parsed.savedAt || 0);
+    const ageMs = Math.max(0, Date.now() - savedAt);
+
+    if (
+      !savedAt ||
+      !parsed.data ||
+      ageMs > LEAGUE_BROWSER_CACHE_MAX_AGE_MS
+    ) {
+      return null;
+    }
+
+    return {
+      data: parsed.data,
+      savedAt,
+      ageMs
+    };
+
+  } catch (error) {
+    console.warn('Unable to read Fantasy league browser cache:', error);
+    return null;
+  }
+}
+
+async function refreshLeagueInBackground_() {
+  const audit = FantasyPerf.start('BACKGROUND league recovery');
+
+  try {
+    const fresh = await jsonpWithRetry_('league', {}, [3000, 6000]);
+
+    if (!fresh || !fresh.ok) {
+      throw new Error(
+        fresh && fresh.error
+          ? fresh.error
+          : 'League recovery did not return data.'
+      );
+    }
+
+    saveLeagueBrowserCache_(fresh);
+    hydrateState(fresh);
+    renderAll();
+
+    setApiStatus(true, 'ESPN Connected');
+
+    audit.end({
+      success: true,
+      refreshedUi: true
+    });
+
+  } catch (error) {
+    audit.fail(error, {
+      success: false,
+      cachedPageStillUsable: true
+    });
+
+    setApiStatus(false, 'Cached Data');
+  }
+}
+
+async function loadDraftboardInBackground_() {
+  const audit =
+    FantasyPerf.start('BACKGROUND draftboard');
+
+  try {
+    const draftData =
+      await jsonp('draftboard');
+
+    hydrateDraftState(draftData);
+
+    audit.end({
+      success: Boolean(
+        draftData &&
+        draftData.ok
+      ),
+      picks:
+        Number(
+          draftData &&
+          draftData.draft &&
+          Array.isArray(draftData.draft.picks)
+            ? draftData.draft.picks.length
+            : 0
+        )
+    });
+
+  } catch (error) {
+    /*
+     * Draft failure should not downgrade the whole league page.
+     * Draft tab already knows how to render unavailable data.
+     */
+    state.draft = null;
+
+    audit.fail(error, {
+      success: false,
+      backgroundOnly: true
+    });
+
+    console.warn(
+      'Draftboard background load failed:',
+      error
+    );
   }
 }
 
@@ -252,6 +581,12 @@ function switchView(view) {
 
   if (nextView === 'battle') {
     animateBattleEntrance();
+
+    window.setTimeout(() => {
+      startBattleFightLoop_();
+    }, 850);
+  } else {
+    stopBattleFightLoop_();
   }
 
   if (nextView === 'draft') {
@@ -919,26 +1254,267 @@ function renderFeaturedMatchup(matchups, week) {
 }
 
 function chooseFeaturedMatchup(matchups, week) {
-  const explicit = matchups.find(match => getMatchupStory(match, week).featured);
-  if (explicit) return explicit;
-
-  const champion = state.teams.find(team => team.defendingChampion);
-
-  if (champion) {
-    const championMatch = matchups.find(match =>
-      Number(match.homeTeamId) === Number(champion.id) ||
-      Number(match.awayTeamId) === Number(champion.id)
-    );
-
-    if (championMatch) return championMatch;
+  if (!Array.isArray(matchups) || !matchups.length) {
+    return null;
   }
 
-  return matchups
-    .slice()
-    .sort((a, b) =>
-      (Number(b.homeScore) + Number(b.awayScore)) -
-      (Number(a.homeScore) + Number(a.awayScore))
-    )[0];
+  // Manual storyline always wins. This preserves special events such as
+  // Week 1's championship rematch.
+  const explicit = matchups.find(match =>
+    getMatchupStory(match, week).featured
+  );
+
+  if (explicit) {
+    console.log('[MatchOfWeek] Manual featured matchup selected', {
+      week,
+      homeTeamId: explicit.homeTeamId,
+      awayTeamId: explicit.awayTeamId
+    });
+
+    return explicit;
+  }
+
+  /*
+   * WEEK 2+ SMART MATCH OF THE WEEK
+   *
+   * Rank each matchup by how meaningful / entertaining it is:
+   * - high-ranked teams
+   * - close records
+   * - same-conference implications
+   * - playoff-position importance
+   * - high-scoring teams
+   * - close live/final score
+   * - defending champion presence (bonus only, never automatic)
+   */
+  const ranked = matchups
+    .map(match => ({
+      match,
+      ...scoreMatchOfWeek_(match, week)
+    }))
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+
+      // Stable deterministic tiebreakers.
+      if (b.combinedPoints !== a.combinedPoints) {
+        return b.combinedPoints - a.combinedPoints;
+      }
+
+      return Number(a.match.matchupId || 0) -
+        Number(b.match.matchupId || 0);
+    });
+
+  const winner = ranked[0];
+
+  console.log('[MatchOfWeek] Auto featured matchup selected', {
+    week,
+    score: winner.score,
+    reasons: winner.reasons,
+    homeTeamId: winner.match.homeTeamId,
+    awayTeamId: winner.match.awayTeamId,
+    candidates: ranked.map(item => ({
+      homeTeamId: item.match.homeTeamId,
+      awayTeamId: item.match.awayTeamId,
+      score: item.score,
+      reasons: item.reasons
+    }))
+  });
+
+  return winner.match;
+}
+
+function scoreMatchOfWeek_(match, week) {
+  const home = state.teamMap.get(Number(match.homeTeamId));
+  const away = state.teamMap.get(Number(match.awayTeamId));
+
+  const homeStanding = getStandingForTeam_(match.homeTeamId);
+  const awayStanding = getStandingForTeam_(match.awayTeamId);
+
+  let score = 0;
+  const reasons = [];
+
+  const homeRank = safeRank_(homeStanding);
+  const awayRank = safeRank_(awayStanding);
+
+  const homeWins = Number(
+    homeStanding && homeStanding.wins != null
+      ? homeStanding.wins
+      : home && home.wins || 0
+  );
+
+  const awayWins = Number(
+    awayStanding && awayStanding.wins != null
+      ? awayStanding.wins
+      : away && away.wins || 0
+  );
+
+  const homeLosses = Number(
+    homeStanding && homeStanding.losses != null
+      ? homeStanding.losses
+      : home && home.losses || 0
+  );
+
+  const awayLosses = Number(
+    awayStanding && awayStanding.losses != null
+      ? awayStanding.losses
+      : away && away.losses || 0
+  );
+
+  const homePF = Number(
+    homeStanding && homeStanding.pointsFor != null
+      ? homeStanding.pointsFor
+      : home && home.pointsFor || 0
+  );
+
+  const awayPF = Number(
+    awayStanding && awayStanding.pointsFor != null
+      ? awayStanding.pointsFor
+      : away && away.pointsFor || 0
+  );
+
+  const sameConference =
+    home &&
+    away &&
+    Number.isFinite(Number(home.divisionId)) &&
+    Number(home.divisionId) === Number(away.divisionId);
+
+  // 1) Top-team showdown.
+  if (homeRank <= 4 && awayRank <= 4) {
+    score += 34;
+    reasons.push('Top 4 showdown');
+  } else if (homeRank <= 6 && awayRank <= 6) {
+    score += 22;
+    reasons.push('Top-half matchup');
+  } else if (homeRank <= 4 || awayRank <= 4) {
+    score += 12;
+    reasons.push('Top contender involved');
+  }
+
+  // 2) Close records create stronger stakes.
+  const winDiff = Math.abs(homeWins - awayWins);
+  const lossDiff = Math.abs(homeLosses - awayLosses);
+
+  if (winDiff === 0 && lossDiff === 0) {
+    score += 18;
+    reasons.push('Identical records');
+  } else if (winDiff <= 1 && lossDiff <= 1) {
+    score += 12;
+    reasons.push('Closely matched records');
+  }
+
+  // 3) Conference / division implications.
+  if (sameConference) {
+    score += 14;
+    reasons.push('Conference race');
+  }
+
+  // 4) Playoff-position significance.
+  const playoffSpots = Number(
+    state.league && state.league.playoffTeams || 0
+  );
+
+  if (playoffSpots > 0) {
+    const homeNearCut =
+      homeRank <= playoffSpots + 2;
+    const awayNearCut =
+      awayRank <= playoffSpots + 2;
+
+    if (homeNearCut && awayNearCut) {
+      score += 18;
+      reasons.push('Playoff-position battle');
+    }
+  }
+
+  // 5) Reward strong offenses.
+  const combinedPF = homePF + awayPF;
+
+  if (combinedPF > 0) {
+    const leaguePf = state.standings
+      .map(row => Number(row.pointsFor || 0))
+      .filter(value => value > 0);
+
+    const avgPF = leaguePf.length
+      ? leaguePf.reduce((sum, value) => sum + value, 0) / leaguePf.length
+      : 0;
+
+    if (avgPF > 0 && homePF >= avgPF && awayPF >= avgPF) {
+      score += 14;
+      reasons.push('Two high-scoring teams');
+    } else if (avgPF > 0 && (homePF >= avgPF || awayPF >= avgPF)) {
+      score += 7;
+      reasons.push('High-scoring contender');
+    }
+  }
+
+  // 6) During/after games, close contests and scoring explosions matter.
+  const homeScore = Number(match.homeScore || 0);
+  const awayScore = Number(match.awayScore || 0);
+  const combinedPoints = homeScore + awayScore;
+  const scoreDiff = Math.abs(homeScore - awayScore);
+
+  if (combinedPoints > 0) {
+    if (scoreDiff <= 5) {
+      score += 20;
+      reasons.push('Nail-biter');
+    } else if (scoreDiff <= 12) {
+      score += 10;
+      reasons.push('Close game');
+    }
+
+    if (combinedPoints >= 250) {
+      score += 14;
+      reasons.push('High-scoring battle');
+    } else if (combinedPoints >= 200) {
+      score += 8;
+      reasons.push('Strong scoring matchup');
+    }
+  }
+
+  // 7) Defending champion gets a meaningful bonus, but never an automatic win.
+  const championInvolved =
+    Boolean(home && home.defendingChampion) ||
+    Boolean(away && away.defendingChampion);
+
+  if (championInvolved) {
+    score += 7;
+    reasons.push('Defending champion');
+  }
+
+  // 8) Later weeks should naturally prioritize meaningful contenders.
+  if (Number(week) >= 8) {
+    if (homeRank <= 8 && awayRank <= 8) {
+      score += 10;
+      reasons.push('Late-season playoff implications');
+    }
+  }
+
+  if (Number(week) >= 12) {
+    if (homeRank <= 6 && awayRank <= 6) {
+      score += 12;
+      reasons.push('Late-season contender showdown');
+    }
+  }
+
+  return {
+    score,
+    reasons,
+    combinedPoints
+  };
+}
+
+function getStandingForTeam_(teamId) {
+  return (state.standings || []).find(row =>
+    Number(row.teamId) === Number(teamId)
+  ) || null;
+}
+
+function safeRank_(standing) {
+  const rank = Number(
+    standing && standing.overallRank
+  );
+
+  return Number.isFinite(rank) && rank > 0
+    ? rank
+    : 999;
 }
 
 function featuredTeamMarkup(team, score, side) {
@@ -1102,13 +1678,25 @@ async function changeWeek(delta) {
 
   if (next === state.selectedWeek) return;
 
+  const audit = FantasyPerf.start('changeWeek', {
+    fromWeek: state.selectedWeek,
+    toWeek: next
+  });
+
   setWeekLoading(next);
 
   try {
     const matchups = await getWeekMatchups(next);
     renderWeek(matchups, next);
+
+    audit.end({
+      success: true,
+      matchups: matchups.length,
+      cacheHit: state.weekCache.has(Number(next))
+    });
   } catch (error) {
     renderWeekError(error, next);
+    audit.fail(error, { success: false });
   }
 }
 
@@ -1218,7 +1806,15 @@ function renderBattleCenter(matchups, week) {
     battleCardMarkup(match, getMatchupStory(match, week), index)
   ).join('');
 
-  requestAnimationFrame(animateBattleEntrance);
+  requestAnimationFrame(() => {
+    animateBattleEntrance();
+
+    if (state.activeView === 'battle') {
+      window.setTimeout(() => {
+        startBattleFightLoop_();
+      }, 850);
+    }
+  });
 }
 
 function battleFeaturedMarkup(match, story, week) {
@@ -1320,19 +1916,73 @@ function getMatchupStory(match, week) {
 function buildDefaultStory(home, away, week) {
   const homeDivision = Number(home && home.divisionId);
   const awayDivision = Number(away && away.divisionId);
-  const sameConference = Number.isFinite(homeDivision) &&
+
+  const sameConference =
+    Number.isFinite(homeDivision) &&
     Number.isFinite(awayDivision) &&
     homeDivision === awayDivision;
 
-  const tag = sameConference ? 'Conference Clash' : 'Cross-Conference Battle';
-  const title = `${home ? home.name : 'Team'} vs ${away ? away.name : 'Team'}`;
-  const reason = sameConference
-    ? `A Week ${week} conference matchup with direct bragging rights inside the ${home && home.division ? home.division : 'division'} race.`
-    : `A Week ${week} cross-conference face-off with both teams trying to build momentum toward the Zenni Cup race.`;
+  const title =
+    `${home ? home.name : 'Team'} vs ${away ? away.name : 'Team'}`;
+
+  const homeStanding =
+    getStandingForTeam_(home && home.id);
+
+  const awayStanding =
+    getStandingForTeam_(away && away.id);
+
+  const homeRank = safeRank_(homeStanding);
+  const awayRank = safeRank_(awayStanding);
+
+  const homeRecord =
+    homeStanding
+      ? `${Number(homeStanding.wins || 0)}-${Number(homeStanding.losses || 0)}`
+      : '';
+
+  const awayRecord =
+    awayStanding
+      ? `${Number(awayStanding.wins || 0)}-${Number(awayStanding.losses || 0)}`
+      : '';
+
+  let eyebrow = `Week ${week} Battle`;
+  let tag =
+    sameConference
+      ? 'Conference Clash'
+      : 'Cross-Conference Battle';
+
+  let reason;
+
+  if (homeRank <= 4 && awayRank <= 4) {
+    eyebrow = 'Contender Showdown';
+    tag = 'Top Teams Collide';
+    reason =
+      `${home ? home.name : 'Team'} (${homeRecord}) and ` +
+      `${away ? away.name : 'Team'} (${awayRecord}) enter Week ${week} ` +
+      `as two of the league's top contenders.`;
+  } else if (sameConference) {
+    eyebrow = 'Conference Race';
+    tag = 'Conference Clash';
+    reason =
+      `A Week ${week} conference matchup with direct positioning and ` +
+      `bragging rights in the ${home && home.division ? home.division : 'conference'} race.`;
+  } else if (
+    (home && home.defendingChampion) ||
+    (away && away.defendingChampion)
+  ) {
+    eyebrow = 'Champion Watch';
+    tag = 'Defending Champion';
+    reason =
+      `The defending champion is back in the spotlight for Week ${week}, ` +
+      `but this matchup earned its place based on the overall weekly matchup ranking.`;
+  } else {
+    reason =
+      `A Week ${week} matchup selected automatically from standings, ` +
+      `records, scoring strength, and weekly stakes in the Zenni Cup race.`;
+  }
 
   return {
     featured: false,
-    eyebrow: `Week ${week} Battle`,
+    eyebrow,
     title,
     subtitle: title,
     reason,
@@ -1355,6 +2005,142 @@ function animateBattleEntrance() {
       element.classList.add('battle-entered');
     });
   });
+}
+
+function startBattleFightLoop_() {
+  stopBattleFightLoop_();
+
+  if (window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    return;
+  }
+
+  const stage = document.querySelector('#battleFeatured .motw-stage');
+
+  if (!stage || state.activeView !== 'battle') {
+    return;
+  }
+
+  battleAnimationState.activeStage = stage;
+  battleAnimationState.cycle += 1;
+
+  // First fight happens quickly after the entrance settles.
+  runBattleFightSequence_(stage);
+
+  // Then let the arena breathe before repeating.
+  battleAnimationState.timer = window.setInterval(() => {
+    if (
+      state.activeView !== 'battle' ||
+      !stage.isConnected ||
+      battleAnimationState.activeStage !== stage
+    ) {
+      stopBattleFightLoop_();
+      return;
+    }
+
+    runBattleFightSequence_(stage);
+  }, 7600);
+}
+
+function stopBattleFightLoop_() {
+  if (battleAnimationState.timer) {
+    window.clearInterval(battleAnimationState.timer);
+    battleAnimationState.timer = null;
+  }
+
+  if (battleAnimationState.sequenceTimer) {
+    window.clearTimeout(battleAnimationState.sequenceTimer);
+    battleAnimationState.sequenceTimer = null;
+  }
+
+  const stage = battleAnimationState.activeStage;
+
+  if (stage && stage.isConnected) {
+    clearBattleFightClasses_(stage);
+  }
+
+  battleAnimationState.activeStage = null;
+}
+
+function clearBattleFightClasses_(stage) {
+  if (!stage) return;
+
+  stage.classList.remove(
+    'fight-staredown',
+    'fight-charge',
+    'fight-impact',
+    'fight-recoil',
+    'fight-reset'
+  );
+}
+
+function runBattleFightSequence_(stage) {
+  if (
+    !stage ||
+    !stage.isConnected ||
+    state.activeView !== 'battle'
+  ) {
+    return;
+  }
+
+  if (battleAnimationState.sequenceTimer) {
+    window.clearTimeout(battleAnimationState.sequenceTimer);
+    battleAnimationState.sequenceTimer = null;
+  }
+
+  clearBattleFightClasses_(stage);
+
+  const phase = (className, delay, next) => {
+    battleAnimationState.sequenceTimer = window.setTimeout(() => {
+      if (
+        !stage.isConnected ||
+        state.activeView !== 'battle' ||
+        battleAnimationState.activeStage !== stage
+      ) {
+        return;
+      }
+
+      clearBattleFightClasses_(stage);
+
+      if (className) {
+        stage.classList.add(className);
+      }
+
+      if (typeof next === 'function') {
+        next();
+      }
+    }, delay);
+  };
+
+  stage.classList.add('fight-staredown');
+
+  phase('fight-charge', 850, () => {
+    phase('fight-impact', 520, () => {
+      triggerBattleImpactParticles_(stage);
+
+      phase('fight-recoil', 320, () => {
+        phase('fight-reset', 560, () => {
+          phase('', 650);
+        });
+      });
+    });
+  });
+}
+
+function triggerBattleImpactParticles_(stage) {
+  const impact = stage.querySelector('.battle-impact');
+  if (!impact) return;
+
+  impact.classList.remove('impact-burst');
+
+  // Force reflow so each fight can replay the burst animation.
+  void impact.offsetWidth;
+
+  impact.classList.add('impact-burst');
+
+  window.setTimeout(() => {
+    impact.classList.remove('impact-burst');
+  }, 900);
 }
 
 function renderStandings() {
@@ -1597,7 +2383,11 @@ function number2(value) {
 
 function jsonp(mode, params = {}) {
   return new Promise((resolve, reject) => {
-    const callback = `zenniJsonp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const audit = FantasyPerf.start(`JSONP ${mode}`, { params });
+    const startedAt = performance.now();
+
+    const callback =
+      `zenniJsonp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
     const query = new URLSearchParams({
       mode,
@@ -1609,28 +2399,113 @@ function jsonp(mode, params = {}) {
     });
 
     const script = document.createElement('script');
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('The ESPN fantasy API took too long to respond.'));
-    }, 15000);
+    let settled = false;
 
-    function cleanup() {
-      clearTimeout(timeout);
-      script.remove();
-      delete window[callback];
+    function installLateCallbackGuard_() {
+      window[callback] = function lateJsonpNoop_() {
+        FantasyPerf.log(`Late JSONP ${mode} response ignored safely`, {
+          params
+        });
+      };
+
+      window.setTimeout(() => {
+        try {
+          delete window[callback];
+        } catch (_) {
+          window[callback] = undefined;
+        }
+      }, 60000);
     }
 
+    function cleanup(keepLateGuard) {
+      clearTimeout(timeout);
+
+      if (script.parentNode) {
+        script.remove();
+      }
+
+      if (keepLateGuard) {
+        installLateCallbackGuard_();
+      } else {
+        try {
+          delete window[callback];
+        } catch (_) {
+          window[callback] = undefined;
+        }
+      }
+    }
+
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+
+      const elapsedMs = performance.now() - startedAt;
+
+      cleanup(true);
+
+      FantasyPerf.log(`JSONP ${mode} TIMEOUT`, {
+        elapsedMs: Number(elapsedMs.toFixed(1)),
+        timeoutMs: 15000,
+        params
+      });
+
+      const error =
+        new Error('The ESPN fantasy API took too long to respond.');
+
+      audit.fail(error, {
+        timeout: true,
+        timeoutMs: 15000,
+        params
+      });
+
+      reject(error);
+    }, 15000);
+
     window[callback] = data => {
-      cleanup();
+      if (settled) return;
+      settled = true;
+
+      const elapsedMs = performance.now() - startedAt;
+
+      cleanup(false);
+
+      audit.end({
+        success: true,
+        responseMs: Number(elapsedMs.toFixed(1)),
+        ok: Boolean(data && data.ok),
+        params
+      });
+
       resolve(data);
     };
 
     script.onerror = () => {
-      cleanup();
-      reject(new Error('Unable to reach the Zenni Fantasy API.'));
+      if (settled) return;
+      settled = true;
+
+      const elapsedMs = performance.now() - startedAt;
+
+      cleanup(true);
+
+      const error =
+        new Error('Unable to reach the Zenni Fantasy API.');
+
+      audit.fail(error, {
+        networkError: true,
+        responseMs: Number(elapsedMs.toFixed(1)),
+        params
+      });
+
+      reject(error);
     };
 
     script.src = `${API_URL}?${query.toString()}`;
+
+    FantasyPerf.log(`JSONP ${mode} request appended`, {
+      params,
+      url: script.src.replace(callback, '<callback>')
+    });
+
     document.body.appendChild(script);
   });
 }
