@@ -141,7 +141,13 @@ const state = {
   draft: null,
   draftCountdownTimer: null,
   draftRound: 1,
-  draftSelectedTeamId: null
+  draftSelectedTeamId: null,
+  battleCastCache: new Map(),
+  battleCastTimer: null,
+  battleCastLoading: false,
+  battleCastSelectedKey: null,
+  battleCastOpen: true,
+  battleCastRequestSeq: 0
 };
 
 document.addEventListener('DOMContentLoaded', init);
@@ -584,9 +590,11 @@ function switchView(view) {
 
     window.setTimeout(() => {
       startBattleFightLoop_();
+      loadBattleFantasyCast_();
     }, 850);
   } else {
     stopBattleFightLoop_();
+    stopBattleFantasyCastPolling_();
   }
 
   if (nextView === 'draft') {
@@ -1743,7 +1751,13 @@ function renderOverviewMatchups(matchups, week) {
     const featured = story.featured ? 'is-highlight' : '';
 
     return `
-      <article class="overview-matchup-card ${featured}">
+      <article
+        class="overview-matchup-card ${featured}"
+        data-matchup-key="${escapeAttr(battleMatchupKey_(match, week))}"
+        role="button"
+        tabindex="0"
+        aria-label="Open FantasyCast for ${escapeAttr(home ? home.name : 'Home')} versus ${escapeAttr(away ? away.name : 'Away')}"
+      >
         <div class="overview-matchup-teams">
           ${overviewMatchupTeamMarkup(home, match.homeScore, 'home')}
           <div class="overview-versus">VS</div>
@@ -1756,6 +1770,8 @@ function renderOverviewMatchups(matchups, week) {
       </article>
     `;
   }).join('');
+
+  bindOverviewFantasyCastCards_(grid);
 }
 
 function overviewMatchupTeamMarkup(team, score, side) {
@@ -1794,17 +1810,43 @@ function renderBattleCenter(matchups, week) {
   if (!matchups.length) {
     featuredContainer.innerHTML = '<div class="error-panel">No battle card is available for this week.</div>';
     grid.innerHTML = '';
+    const cast = document.getElementById('battleFantasyCast');
+    if (cast) cast.innerHTML = '';
     return;
   }
 
   const featured = chooseFeaturedMatchup(matchups, week);
+  const validKeys = new Set(matchups.map(match => battleMatchupKey_(match, week)));
+  const featuredKey = battleMatchupKey_(featured, week);
+
+  // New week or stale selection: start with Match of the Week open.
+  if (!state.battleCastSelectedKey || !validKeys.has(state.battleCastSelectedKey)) {
+    state.battleCastSelectedKey = featuredKey;
+    state.battleCastOpen = true;
+  }
+
   const others = matchups.filter(match => match !== featured);
   const featuredStory = getMatchupStory(featured, week);
 
   featuredContainer.innerHTML = battleFeaturedMarkup(featured, featuredStory, week);
+
+  const featuredStage = featuredContainer.querySelector('.motw-stage');
+  if (featuredStage) {
+    featuredStage.dataset.matchupKey = featuredKey;
+    featuredStage.setAttribute('role', 'button');
+    featuredStage.setAttribute('tabindex', '0');
+    featuredStage.classList.toggle(
+      'is-cast-selected',
+      state.battleCastOpen && state.battleCastSelectedKey === featuredKey
+    );
+  }
+
   grid.innerHTML = others.map((match, index) =>
     battleCardMarkup(match, getMatchupStory(match, week), index)
   ).join('');
+
+  bindBattleFantasyCastCards_(featuredContainer, grid);
+  updateBattleCastSelectionUi_();
 
   requestAnimationFrame(() => {
     animateBattleEntrance();
@@ -1812,11 +1854,16 @@ function renderBattleCenter(matchups, week) {
     if (state.activeView === 'battle') {
       window.setTimeout(() => {
         startBattleFightLoop_();
+
+        if (state.battleCastOpen) {
+          loadBattleFantasyCast_();
+        } else {
+          hideBattleFantasyCast_(false);
+        }
       }, 850);
     }
   });
 }
-
 function battleFeaturedMarkup(match, story, week) {
   const home = state.teamMap.get(Number(match.homeTeamId));
   const away = state.teamMap.get(Number(match.awayTeamId));
@@ -1852,7 +1899,14 @@ function battleCardMarkup(match, story, index) {
   const away = state.teamMap.get(Number(match.awayTeamId));
 
   return `
-    <article class="battle-card" style="--battle-delay:${index * 90}ms">
+    <article
+      class="battle-card"
+      style="--battle-delay:${index * 90}ms"
+      data-matchup-key="${escapeAttr(battleMatchupKey_(match, match.week || state.selectedWeek))}"
+      role="button"
+      tabindex="0"
+      aria-label="Open FantasyCast for ${escapeAttr(home ? home.name : 'Home')} versus ${escapeAttr(away ? away.name : 'Away')}"
+    >
       <div class="battle-card-tag">${escapeHtml(story.tag)}</div>
 
       <div class="battle-card-fighters">
@@ -1869,6 +1923,11 @@ function battleCardMarkup(match, story, index) {
       <div class="battle-status">
         <span>Week ${match.week || state.selectedWeek}</span>
         <span>${escapeHtml(match.status || 'Scheduled')}</span>
+      </div>
+
+      <div class="battle-cast-hint">
+        <span>View FantasyCast</span>
+        <strong>+</strong>
       </div>
     </article>
   `;
@@ -1899,6 +1958,577 @@ function battleMiniFighterMarkup(team, score, side) {
       <span>${number2(score)}</span>
     </div>
   `;
+}
+
+
+
+function battleMatchupKey_(match, week) {
+  if (!match) return '';
+  return `${Number(week || match.week || state.selectedWeek || 1)}:${Number(match.homeTeamId || 0)}-${Number(match.awayTeamId || 0)}`;
+}
+
+function getBattleMatchupByKey_(key) {
+  const week = Number(state.selectedWeek || 1);
+  const matchups = state.weekCache.get(week) || state.currentMatchups || [];
+  return matchups.find(match => battleMatchupKey_(match, week) === String(key || '')) || null;
+}
+
+function bindBattleFantasyCastCards_(featuredContainer, grid) {
+  const clickable = [
+    ...(featuredContainer ? featuredContainer.querySelectorAll('[data-matchup-key]') : []),
+    ...(grid ? grid.querySelectorAll('[data-matchup-key]') : [])
+  ];
+
+  clickable.forEach(element => {
+    const activate = () => toggleBattleFantasyCast_(element.dataset.matchupKey);
+
+    element.addEventListener('click', event => {
+      if (event.target.closest('button, a')) return;
+      activate();
+    });
+
+    element.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      activate();
+    });
+  });
+}
+
+function bindOverviewFantasyCastCards_(grid) {
+  if (!grid) return;
+
+  grid.querySelectorAll('[data-matchup-key]').forEach(card => {
+    const activate = () => openBattleCastFromMatchup_(card.dataset.matchupKey);
+
+    card.addEventListener('click', activate);
+    card.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      activate();
+    });
+  });
+}
+
+function openBattleCastFromMatchup_(key) {
+  if (!getBattleMatchupByKey_(key)) return;
+
+  state.battleCastSelectedKey = key;
+  state.battleCastOpen = true;
+
+  switchView('battle');
+
+  window.setTimeout(() => {
+    updateBattleCastSelectionUi_();
+    loadBattleFantasyCast_(true);
+    scrollBattleFantasyCastIntoView_();
+  }, 120);
+}
+
+function toggleBattleFantasyCast_(key) {
+  if (!key || !getBattleMatchupByKey_(key)) return;
+
+  const sameMatchup = state.battleCastSelectedKey === key;
+
+  if (sameMatchup && state.battleCastOpen) {
+    hideBattleFantasyCast_();
+    return;
+  }
+
+  state.battleCastSelectedKey = key;
+  state.battleCastOpen = true;
+
+  updateBattleCastSelectionUi_();
+  loadBattleFantasyCast_(true);
+
+  window.setTimeout(scrollBattleFantasyCastIntoView_, 80);
+}
+
+function hideBattleFantasyCast_(scroll = false) {
+  state.battleCastOpen = false;
+  state.battleCastRequestSeq += 1;
+  stopBattleFantasyCastPolling_();
+
+  const container = document.getElementById('battleFantasyCast');
+  if (container) {
+    container.classList.remove('is-open');
+    container.innerHTML = '';
+  }
+
+  updateBattleCastSelectionUi_();
+
+  if (scroll) {
+    const grid = document.getElementById('battleGrid');
+    if (grid) grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function updateBattleCastSelectionUi_() {
+  const selectedKey = state.battleCastOpen ? state.battleCastSelectedKey : '';
+
+  document.querySelectorAll('#battleFeatured [data-matchup-key], #battleGrid [data-matchup-key]').forEach(element => {
+    const selected = element.dataset.matchupKey === selectedKey;
+    element.classList.toggle('is-cast-selected', selected);
+
+    const hint = element.querySelector('.battle-cast-hint');
+    if (hint) {
+      const label = hint.querySelector('span');
+      const icon = hint.querySelector('strong');
+      if (label) label.textContent = selected ? 'Hide FantasyCast' : 'View FantasyCast';
+      if (icon) icon.textContent = selected ? '−' : '+';
+    }
+  });
+}
+
+function scrollBattleFantasyCastIntoView_() {
+  const container = document.getElementById('battleFantasyCast');
+  if (!container || !container.innerHTML.trim()) return;
+
+  container.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start'
+  });
+}
+
+const BATTLE_CAST_REFRESH_MS = 30000;
+const BATTLE_STARTER_SLOT_ORDER = Object.freeze([
+  'QB', 'RB', 'RB', 'WR', 'WR', 'TE', 'FLEX', 'FLEX', 'D/ST', 'K'
+]);
+
+async function loadBattleFantasyCast_(force = false) {
+  if (state.activeView !== 'battle' || state.battleCastLoading || !state.battleCastOpen) return;
+
+  const week = Number(state.selectedWeek || 1);
+  const currentWeek = Number(state.league && state.league.currentWeek || 1);
+  const matchups = state.weekCache.get(week) || state.currentMatchups || [];
+  if (!matchups.length) {
+    stopBattleFantasyCastPolling_();
+    return;
+  }
+
+  // The roster API represents the current lineup. Keep FantasyCast on current week.
+  if (week !== currentWeek) {
+    const container = document.getElementById('battleFantasyCast');
+    if (container && state.battleCastOpen) {
+      container.innerHTML = `
+        <div class="fantasycast-unavailable">
+          <strong>FantasyCast is available for the current week.</strong>
+          <span>Return to Week ${currentWeek} to view the live ESPN lineup.</span>
+          <button type="button" data-fantasycast-close>Hide</button>
+        </div>
+      `;
+      const close = container.querySelector('[data-fantasycast-close]');
+      if (close) close.addEventListener('click', () => hideBattleFantasyCast_());
+    }
+    stopBattleFantasyCastPolling_();
+    return;
+  }
+
+  let selected = getBattleMatchupByKey_(state.battleCastSelectedKey);
+
+  if (!selected) {
+    selected = chooseFeaturedMatchup(matchups, week);
+    state.battleCastSelectedKey = battleMatchupKey_(selected, week);
+  }
+
+  if (!selected) return;
+
+  const selectionKey = battleMatchupKey_(selected, week);
+  const homeId = Number(selected.homeTeamId);
+  const awayId = Number(selected.awayTeamId);
+  const cacheKey = `${week}:${homeId}-${awayId}`;
+  const cached = state.battleCastCache.get(cacheKey);
+
+  if (!force && cached && (Date.now() - cached.savedAt) < 15000) {
+    if (state.battleCastOpen && state.battleCastSelectedKey === selectionKey) {
+      renderBattleFantasyCast_(selected, cached.homeRoster, cached.awayRoster, week);
+    }
+
+    if (shouldShowFantasyCast_(selected, cached.homeRoster, cached.awayRoster)) {
+      startBattleFantasyCastPolling_();
+    } else {
+      stopBattleFantasyCastPolling_();
+    }
+    return;
+  }
+
+  state.battleCastLoading = true;
+  const requestSeq = ++state.battleCastRequestSeq;
+
+  const container = document.getElementById('battleFantasyCast');
+  if (container && state.battleCastOpen) {
+    container.classList.add('is-open');
+    container.innerHTML = `
+      <div class="fantasycast-loading">
+        <span class="fantasycast-live-dot"></span>
+        <strong>Loading FantasyCast...</strong>
+        <small>Syncing both ESPN rosters</small>
+      </div>
+    `;
+  }
+
+  try {
+    const [homeData, awayData] = await Promise.all([
+      jsonp('roster', { teamId: homeId }),
+      jsonp('roster', { teamId: awayId })
+    ]);
+
+    // User may have clicked another matchup while these requests were loading.
+    if (
+      requestSeq !== state.battleCastRequestSeq ||
+      !state.battleCastOpen ||
+      state.battleCastSelectedKey !== selectionKey
+    ) {
+      return;
+    }
+
+    const homeRoster = Array.isArray(homeData && homeData.roster) ? homeData.roster : [];
+    const awayRoster = Array.isArray(awayData && awayData.roster) ? awayData.roster : [];
+
+    state.battleCastCache.set(cacheKey, {
+      savedAt: Date.now(),
+      homeRoster,
+      awayRoster
+    });
+
+    renderBattleFantasyCast_(selected, homeRoster, awayRoster, week);
+
+    if (shouldShowFantasyCast_(selected, homeRoster, awayRoster)) {
+      startBattleFantasyCastPolling_();
+    } else {
+      stopBattleFantasyCastPolling_();
+    }
+  } catch (error) {
+    console.warn('Battle FantasyCast roster load failed:', error);
+
+    if (
+      requestSeq === state.battleCastRequestSeq &&
+      state.battleCastOpen &&
+      state.battleCastSelectedKey === selectionKey &&
+      container
+    ) {
+      container.innerHTML = `
+        <div class="fantasycast-unavailable">
+          <strong>FantasyCast could not load this matchup.</strong>
+          <span>${escapeHtml(error && error.message ? error.message : String(error))}</span>
+          <button type="button" data-fantasycast-close>Hide</button>
+        </div>
+      `;
+      const close = container.querySelector('[data-fantasycast-close]');
+      if (close) close.addEventListener('click', () => hideBattleFantasyCast_());
+    }
+  } finally {
+    state.battleCastLoading = false;
+  }
+}
+function startBattleFantasyCastPolling_() {
+  if (state.battleCastTimer) return;
+
+  state.battleCastTimer = window.setInterval(() => {
+    if (state.activeView !== 'battle') {
+      stopBattleFantasyCastPolling_();
+      return;
+    }
+    if (state.battleCastOpen) {
+      loadBattleFantasyCast_(true);
+    }
+  }, BATTLE_CAST_REFRESH_MS);
+}
+
+function stopBattleFantasyCastPolling_() {
+  if (!state.battleCastTimer) return;
+  window.clearInterval(state.battleCastTimer);
+  state.battleCastTimer = null;
+}
+
+function shouldShowFantasyCast_(match, homeRoster, awayRoster) {
+  if (Number(match.homeScore || 0) > 0 || Number(match.awayScore || 0) > 0) return true;
+
+  const players = [...homeRoster, ...awayRoster];
+  if (players.some(player => {
+    const status = battlePlayerGameStatus_(player);
+    return ['LIVE', 'IN_PROGRESS', 'FINAL', 'POST'].includes(status);
+  })) return true;
+
+  // Fallback when ESPN's roster payload does not expose NFL game status.
+  // FantasyCast automatically becomes the Battle Center presentation Thu-Mon
+  // for the current fantasy week.
+  const day = new Date().getDay(); // Sun 0 ... Sat 6
+  return day === 0 || day === 1 || day === 4 || day === 5 || day === 6;
+}
+
+
+function battleFantasyCastModeLabel_(players, match) {
+  const statuses = players.map(battlePlayerGameStatus_);
+  if (statuses.some(status => status === 'LIVE' || status === 'IN_PROGRESS')) {
+    return 'LIVE FANTASYCAST';
+  }
+  if (
+    statuses.length &&
+    statuses.every(status => !status || status === 'FINAL' || status === 'POST') &&
+    (Number(match.homeScore || 0) > 0 || Number(match.awayScore || 0) > 0)
+  ) {
+    return 'FINAL FANTASYCAST';
+  }
+  return 'FANTASYCAST PREVIEW';
+}
+
+function renderBattleFantasyCast_(match, homeRoster, awayRoster, week) {
+  const container = document.getElementById('battleFantasyCast');
+  if (!container) return;
+
+  const home = state.teamMap.get(Number(match.homeTeamId));
+  const away = state.teamMap.get(Number(match.awayTeamId));
+  const homeLineup = normalizeBattleLineup_(homeRoster);
+  const awayLineup = normalizeBattleLineup_(awayRoster);
+
+  const homeProjection = rosterProjectionTotal_(homeLineup.starters);
+  const awayProjection = rosterProjectionTotal_(awayLineup.starters);
+  const homeScore = Number(match.homeScore || 0);
+  const awayScore = Number(match.awayScore || 0);
+  const chance = battleWinChance_(homeScore, awayScore, homeProjection, awayProjection);
+
+  container.innerHTML = `
+    <div class="fantasycast-shell">
+      <div class="fantasycast-topbar">
+        <div>
+          <span class="fantasycast-live-dot"></span>
+          <strong>${battleFantasyCastModeLabel_([...homeRoster, ...awayRoster], match)}</strong>
+        </div>
+
+        <div class="fantasycast-topbar-actions">
+          <span>WEEK ${week} · AUTO REFRESH 30 SEC</span>
+          <button type="button" class="fantasycast-hide-button" data-fantasycast-close aria-label="Hide FantasyCast">
+            <span>Hide</span>
+            <strong>×</strong>
+          </button>
+        </div>
+      </div>
+
+      <div class="fantasycast-scoreboard">
+        ${fantasyCastTeamHeader_(home, homeScore, homeProjection, 'left')}
+        <div class="fantasycast-center">
+          <span>CHANCE TO WIN</span>
+          <strong>${chance.home}% <em>VS</em> ${chance.away}%</strong>
+        </div>
+        ${fantasyCastTeamHeader_(away, awayScore, awayProjection, 'right')}
+      </div>
+
+      <div class="fantasycast-winbar" aria-label="Chance to win">
+        <span style="width:${chance.home}%"></span>
+      </div>
+
+      <div class="fantasycast-lineup-head">
+        <span>${escapeHtml(home ? home.name : 'Home')}</span>
+        <strong>STARTING LINEUPS</strong>
+        <span>${escapeHtml(away ? away.name : 'Away')}</span>
+      </div>
+
+      <div class="fantasycast-lineups">
+        ${BATTLE_STARTER_SLOT_ORDER.map((slot, index) =>
+          fantasyCastMatchupRow_(
+            homeLineup.starters[index] || null,
+            awayLineup.starters[index] || null,
+            slot
+          )
+        ).join('')}
+      </div>
+
+      <div class="fantasycast-bench-title">BENCH</div>
+      <div class="fantasycast-lineups fantasycast-bench">
+        ${Array.from({ length: Math.max(homeLineup.bench.length, awayLineup.bench.length) }, (_, index) =>
+          fantasyCastMatchupRow_(
+            homeLineup.bench[index] || null,
+            awayLineup.bench[index] || null,
+            'BENCH'
+          )
+        ).join('')}
+      </div>
+    </div>
+  `;
+
+  container.classList.add('is-open');
+
+  const closeButton = container.querySelector('[data-fantasycast-close]');
+  if (closeButton) {
+    closeButton.addEventListener('click', () => hideBattleFantasyCast_());
+  }
+
+  updateBattleCastSelectionUi_();
+}
+
+function fantasyCastTeamHeader_(team, score, projection, side) {
+  return `
+    <div class="fantasycast-team fantasycast-team-${side}">
+      <img class="${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
+      <div>
+        <strong>${escapeHtml(team ? team.name : 'Unknown Team')}</strong>
+        <span>${escapeHtml(team ? ownerText(team) : '')}</span>
+        <div class="fantasycast-score">${number2(score)}</div>
+        <small>${projection > 0 ? `PROJ ${projection.toFixed(1)}` : 'PROJECTION PENDING'}</small>
+      </div>
+    </div>
+  `;
+}
+
+function normalizeBattleLineup_(roster) {
+  const players = Array.isArray(roster) ? roster.slice() : [];
+  const starters = players.filter(player => !isBattleBenchPlayer_(player));
+  const bench = players.filter(player => isBattleBenchPlayer_(player) && !isBattleIrPlayer_(player));
+
+  const used = new Set();
+  const orderedStarters = BATTLE_STARTER_SLOT_ORDER.map(slot => {
+    const index = starters.findIndex((player, i) => !used.has(i) && battleSlotMatches_(player, slot));
+    if (index < 0) return null;
+    used.add(index);
+    return starters[index];
+  });
+
+  // If ESPN uses an unfamiliar slot label, do not lose the player.
+  starters.forEach((player, index) => {
+    if (used.has(index)) return;
+    const empty = orderedStarters.findIndex(value => value == null);
+    if (empty >= 0) orderedStarters[empty] = player;
+  });
+
+  return { starters: orderedStarters, bench };
+}
+
+function battleSlotMatches_(player, expected) {
+  const slot = String(player && (player.lineupSlot || player.slot || '') || '').toUpperCase();
+  const pos = String(player && player.position || '').toUpperCase();
+
+  if (expected === 'FLEX') {
+    return ['FLEX', 'RB/WR/TE', 'WR/RB/TE', 'OP'].includes(slot);
+  }
+  if (expected === 'D/ST') {
+    return ['D/ST', 'DST', 'DEF'].includes(slot) || ['D/ST', 'DST', 'DEF'].includes(pos);
+  }
+  return slot === expected || (!slot && pos === expected);
+}
+
+function isBattleBenchPlayer_(player) {
+  const slot = String(player && (player.lineupSlot || player.slot || '') || '').toUpperCase();
+  return ['BE', 'BENCH', 'IR', 'RES', 'RESERVE'].includes(slot);
+}
+
+function isBattleIrPlayer_(player) {
+  const slot = String(player && (player.lineupSlot || player.slot || '') || '').toUpperCase();
+  return ['IR', 'RES', 'RESERVE'].includes(slot);
+}
+
+function fantasyCastMatchupRow_(left, right, slot) {
+  return `
+    <div class="fantasycast-row">
+      ${fantasyCastPlayer_(left, 'left')}
+      <div class="fantasycast-slot">${escapeHtml(slot)}</div>
+      ${fantasyCastPlayer_(right, 'right')}
+    </div>
+  `;
+}
+
+function fantasyCastPlayer_(player, side) {
+  if (!player) {
+    return `<div class="fantasycast-player fantasycast-player-${side} is-empty"><span>Empty</span></div>`;
+  }
+
+  const actual = battlePlayerActualPoints_(player);
+  const projection = battlePlayerProjection_(player);
+  const status = battlePlayerStatusLabel_(player);
+  const opponent = battlePlayerOpponent_(player);
+  const injury = String(player.injuryStatus || '').toUpperCase();
+  const injuryBadge = injury && injury !== 'ACTIVE'
+    ? `<b class="fantasycast-injury">${escapeHtml(injury)}</b>`
+    : '';
+
+  return `
+    <div class="fantasycast-player fantasycast-player-${side}">
+      <div class="fantasycast-player-main">
+        <strong>${escapeHtml(player.name || 'Unknown Player')}</strong>
+        ${injuryBadge}
+        <span>${escapeHtml(player.proTeam || player.proTeamAbbrev || '')}${opponent ? ` · ${escapeHtml(opponent)}` : ''}</span>
+        <small class="${status.className}">${escapeHtml(status.text)}</small>
+      </div>
+      <div class="fantasycast-player-score">
+        <strong>${actual == null ? '--' : actual.toFixed(1)}</strong>
+        <span>${projection == null ? 'PROJ --' : `PROJ ${projection.toFixed(1)}`}</span>
+      </div>
+    </div>
+  `;
+}
+
+function battlePlayerActualPoints_(player) {
+  const candidates = [
+    player.fantasyPoints, player.points, player.actualPoints,
+    player.currentPoints, player.score, player.totalPoints
+  ];
+  for (const value of candidates) {
+    if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+function battlePlayerProjection_(player) {
+  const candidates = [
+    player.projectedPoints, player.projection, player.projectedScore,
+    player.projectedFantasyPoints, player.seasonProjectedPoints
+  ];
+  for (const value of candidates) {
+    if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+function rosterProjectionTotal_(starters) {
+  return starters.reduce((sum, player) => sum + (battlePlayerProjection_(player) || 0), 0);
+}
+
+function battlePlayerGameStatus_(player) {
+  return String(
+    player.gameStatus || player.proGameStatus || player.status || player.gameState || ''
+  ).toUpperCase();
+}
+
+function battleHasLivePlayers_(players) {
+  return players.some(player => ['LIVE', 'IN_PROGRESS'].includes(battlePlayerGameStatus_(player)));
+}
+
+function battlePlayerStatusLabel_(player) {
+  const status = battlePlayerGameStatus_(player);
+  const clock = player.gameClock || player.clock || '';
+  const period = player.period || player.quarter || '';
+
+  if (status === 'LIVE' || status === 'IN_PROGRESS') {
+    return { text: `LIVE${period ? ` · Q${period}` : ''}${clock ? ` ${clock}` : ''}`, className: 'is-live' };
+  }
+  if (status === 'FINAL' || status === 'POST') {
+    return { text: 'FINAL', className: 'is-final' };
+  }
+
+  const kickoff = player.kickoff || player.gameTime || player.startTime || '';
+  return { text: kickoff ? String(kickoff) : 'UPCOMING', className: 'is-upcoming' };
+}
+
+function battlePlayerOpponent_(player) {
+  const opponent = player.opponent || player.opponentAbbrev || player.proOpponent || '';
+  if (!opponent) return '';
+  const away = player.isAway === true || String(player.homeAway || '').toUpperCase() === 'AWAY';
+  return `${away ? '@' : 'vs'} ${opponent}`;
+}
+
+function battleWinChance_(homeScore, awayScore, homeProjection, awayProjection) {
+  const homeBase = Math.max(0, Number(homeScore || 0)) + Math.max(0, Number(homeProjection || 0));
+  const awayBase = Math.max(0, Number(awayScore || 0)) + Math.max(0, Number(awayProjection || 0));
+  const total = homeBase + awayBase;
+
+  if (total <= 0) return { home: 50, away: 50 };
+
+  const home = Math.max(5, Math.min(95, Math.round((homeBase / total) * 100)));
+  return { home, away: 100 - home };
 }
 
 function getMatchupStory(match, week) {
