@@ -147,7 +147,8 @@ const state = {
   battleCastLoading: false,
   battleCastSelectedKey: null,
   battleCastOpen: true,
-  battleCastRequestSeq: 0
+  battleCastRequestSeq: 0,
+  scoreSyncTimer: null
 };
 
 document.addEventListener('DOMContentLoaded', init);
@@ -216,6 +217,11 @@ async function init() {
 
     hydrateState(data);
 
+    // The league summary can contain ESPN's lightweight schedule values,
+    // which may still be 0.00. Always replace the current week with the
+    // authoritative boxscore/live-scoring endpoint before the first render.
+    await refreshCurrentWeekMatchups_(false);
+
     hydrateAudit.end({
       teams: state.teams.length,
       standings: state.standings.length,
@@ -228,6 +234,7 @@ async function init() {
     const renderAudit = FantasyPerf.start('Initial renderAll');
 
     renderAll();
+    startCurrentWeekScorePolling_();
 
     renderAudit.end();
 
@@ -378,6 +385,7 @@ async function refreshLeagueInBackground_() {
 
     saveLeagueBrowserCache_(fresh);
     hydrateState(fresh);
+    await refreshCurrentWeekMatchups_(false);
     renderAll();
 
     setApiStatus(true, 'ESPN Connected');
@@ -1709,14 +1717,64 @@ async function changeWeek(delta) {
 }
 
 async function getWeekMatchups(week) {
-  if (state.weekCache.has(Number(week))) {
-    return state.weekCache.get(Number(week));
+  const targetWeek = Number(week);
+  const currentWeek = Number(state.league && state.league.currentWeek || state.selectedWeek || 1);
+
+  if (targetWeek !== currentWeek && state.weekCache.has(targetWeek)) {
+    return state.weekCache.get(targetWeek);
   }
 
-  const data = await jsonp('matchups', { week });
+  const data = await jsonp('matchups', { week: targetWeek, _ts: Date.now() });
   const matchups = Array.isArray(data.matchups) ? data.matchups : [];
-  state.weekCache.set(Number(week), matchups);
+  state.weekCache.set(targetWeek, matchups);
+
+  if (targetWeek === currentWeek) {
+    state.currentMatchups = matchups;
+  }
+
   return matchups;
+}
+
+async function refreshCurrentWeekMatchups_(render = true) {
+  const currentWeek = Number(state.league && state.league.currentWeek || state.selectedWeek || 1);
+
+  try {
+    const data = await jsonp('matchups', { week: currentWeek, _ts: Date.now() });
+    const matchups = Array.isArray(data.matchups) ? data.matchups : [];
+
+    if (matchups.length) {
+      state.currentMatchups = matchups;
+      state.weekCache.set(currentWeek, matchups);
+
+      if (render && Number(state.selectedWeek) === currentWeek) {
+        renderWeek(matchups, currentWeek);
+      }
+    }
+
+    return matchups;
+  } catch (error) {
+    console.warn('Current-week score refresh failed:', error);
+    return state.currentMatchups || [];
+  }
+}
+
+function startCurrentWeekScorePolling_() {
+  stopCurrentWeekScorePolling_();
+
+  state.scoreSyncTimer = window.setInterval(async () => {
+    await refreshCurrentWeekMatchups_(true);
+
+    if (state.activeView === 'battle' && state.battleCastOpen) {
+      loadBattleFantasyCast_(true);
+    }
+  }, 60000);
+}
+
+function stopCurrentWeekScorePolling_() {
+  if (state.scoreSyncTimer) {
+    window.clearInterval(state.scoreSyncTimer);
+    state.scoreSyncTimer = null;
+  }
 }
 
 function setWeekLoading(week) {
@@ -2090,7 +2148,7 @@ function scrollBattleFantasyCastIntoView_() {
   });
 }
 
-const BATTLE_CAST_REFRESH_MS = 30000;
+const BATTLE_CAST_REFRESH_MS = 60000;
 const BATTLE_STARTER_SLOT_ORDER = Object.freeze([
   'QB', 'RB', 'RB', 'WR', 'WR', 'TE', 'FLEX', 'FLEX', 'D/ST', 'K'
 ]);
@@ -2141,7 +2199,7 @@ async function loadBattleFantasyCast_(force = false) {
 
   if (!force && cached && (Date.now() - cached.savedAt) < 15000) {
     if (state.battleCastOpen && state.battleCastSelectedKey === selectionKey) {
-      renderBattleFantasyCast_(selected, cached.homeRoster, cached.awayRoster, week);
+      renderBattleFantasyCast_(selected, cached.homeRoster, cached.awayRoster, week, cached.homeData, cached.awayData);
     }
 
     if (shouldShowFantasyCast_(selected, cached.homeRoster, cached.awayRoster)) {
@@ -2188,10 +2246,12 @@ async function loadBattleFantasyCast_(force = false) {
     state.battleCastCache.set(cacheKey, {
       savedAt: Date.now(),
       homeRoster,
-      awayRoster
+      awayRoster,
+      homeData,
+      awayData
     });
 
-    renderBattleFantasyCast_(selected, homeRoster, awayRoster, week);
+    renderBattleFantasyCast_(selected, homeRoster, awayRoster, week, homeData, awayData);
 
     if (shouldShowFantasyCast_(selected, homeRoster, awayRoster)) {
       startBattleFantasyCastPolling_();
@@ -2241,39 +2301,39 @@ function stopBattleFantasyCastPolling_() {
   state.battleCastTimer = null;
 }
 
-function shouldShowFantasyCast_(match, homeRoster, awayRoster) {
-  if (Number(match.homeScore || 0) > 0 || Number(match.awayScore || 0) > 0) return true;
-
-  const players = [...homeRoster, ...awayRoster];
-  if (players.some(player => {
-    const status = battlePlayerGameStatus_(player);
-    return ['LIVE', 'IN_PROGRESS', 'FINAL', 'POST'].includes(status);
-  })) return true;
-
-  // Fallback when ESPN's roster payload does not expose NFL game status.
-  // FantasyCast automatically becomes the Battle Center presentation Thu-Mon
-  // for the current fantasy week.
-  const day = new Date().getDay(); // Sun 0 ... Sat 6
-  return day === 0 || day === 1 || day === 4 || day === 5 || day === 6;
+function battleStarterPlayers_(homeRoster, awayRoster) {
+  const home = normalizeBattleLineup_(homeRoster).starters.filter(Boolean);
+  const away = normalizeBattleLineup_(awayRoster).starters.filter(Boolean);
+  return home.concat(away);
 }
 
+function battleStarterStatusSummary_(homeRoster, awayRoster) {
+  const starters = battleStarterPlayers_(homeRoster, awayRoster);
+  const statuses = starters.map(battlePlayerGameStatus_).filter(Boolean);
+  const hasLive = statuses.some(status => status === 'LIVE' || status === 'IN_PROGRESS');
+  const hasUpcoming = statuses.some(status => status === 'PRE' || status === 'SCHEDULED' || status === 'UPCOMING' || !status);
+  const complete = statuses.length > 0 && statuses.every(status => status === 'FINAL' || status === 'POST');
+  return { starters, statuses, hasLive, hasUpcoming, complete };
+}
 
-function battleFantasyCastModeLabel_(players, match) {
-  const statuses = players.map(battlePlayerGameStatus_);
-  if (statuses.some(status => status === 'LIVE' || status === 'IN_PROGRESS')) {
-    return 'LIVE FANTASYCAST';
-  }
-  if (
-    statuses.length &&
-    statuses.every(status => !status || status === 'FINAL' || status === 'POST') &&
-    (Number(match.homeScore || 0) > 0 || Number(match.awayScore || 0) > 0)
-  ) {
-    return 'FINAL FANTASYCAST';
-  }
+function shouldShowFantasyCast_(match, homeRoster, awayRoster) {
+  if (!state.battleCastOpen) return false;
+  if (Number(state.selectedWeek || 1) !== Number(state.league && state.league.currentWeek || 1)) return false;
+
+  // Bench/IR do NOT control the matchup clock. Once every starter on both
+  // teams is FINAL, the fantasy matchup is complete and automatic polling stops.
+  const summary = battleStarterStatusSummary_(homeRoster, awayRoster);
+  return !summary.complete;
+}
+
+function battleFantasyCastModeLabel_(homeRoster, awayRoster) {
+  const summary = battleStarterStatusSummary_(homeRoster, awayRoster);
+  if (summary.hasLive) return 'LIVE FANTASYCAST';
+  if (summary.complete) return 'COMPLETED FANTASYCAST';
   return 'FANTASYCAST PREVIEW';
 }
 
-function renderBattleFantasyCast_(match, homeRoster, awayRoster, week) {
+function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData = null, awayData = null) {
   const container = document.getElementById('battleFantasyCast');
   if (!container) return;
 
@@ -2282,22 +2342,37 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week) {
   const homeLineup = normalizeBattleLineup_(homeRoster);
   const awayLineup = normalizeBattleLineup_(awayRoster);
 
-  const homeProjection = rosterProjectionTotal_(homeLineup.starters);
-  const awayProjection = rosterProjectionTotal_(awayLineup.starters);
-  const homeScore = Number(match.homeScore || 0);
-  const awayScore = Number(match.awayScore || 0);
+  const homeProjection = Number.isFinite(Number(homeData && homeData.teamProjectedPoints))
+    ? Number(homeData.teamProjectedPoints)
+    : rosterProjectionTotal_(homeLineup.starters);
+  const awayProjection = Number.isFinite(Number(awayData && awayData.teamProjectedPoints))
+    ? Number(awayData.teamProjectedPoints)
+    : rosterProjectionTotal_(awayLineup.starters);
+  const homeScore = Number.isFinite(Number(homeData && homeData.teamFantasyPoints))
+    ? Number(homeData.teamFantasyPoints)
+    : Number(match.homeScore || 0);
+  const awayScore = Number.isFinite(Number(awayData && awayData.teamFantasyPoints))
+    ? Number(awayData.teamFantasyPoints)
+    : Number(match.awayScore || 0);
   const chance = battleWinChance_(homeScore, awayScore, homeProjection, awayProjection);
+  const starterStatus = battleStarterStatusSummary_(homeRoster, awayRoster);
+  const hasLive = starterStatus.hasLive;
+  const isComplete = starterStatus.complete;
 
   container.innerHTML = `
     <div class="fantasycast-shell">
       <div class="fantasycast-topbar">
         <div>
           <span class="fantasycast-live-dot"></span>
-          <strong>${battleFantasyCastModeLabel_([...homeRoster, ...awayRoster], match)}</strong>
+          <strong>${battleFantasyCastModeLabel_(homeRoster, awayRoster)}</strong>
         </div>
 
         <div class="fantasycast-topbar-actions">
-          <span>WEEK ${week} · AUTO REFRESH 30 SEC</span>
+          <span>WEEK ${week} · ${isComplete ? 'COMPLETED' : hasLive ? 'LIVE · AUTO REFRESH 60 SEC' : 'SCHEDULED · AUTO REFRESH 60 SEC'}</span>
+          <button type="button" class="fantasycast-refresh-button" data-fantasycast-refresh aria-label="Refresh FantasyCast now">
+            <span>Refresh</span>
+            <strong>↻</strong>
+          </button>
           <button type="button" class="fantasycast-hide-button" data-fantasycast-close aria-label="Hide FantasyCast">
             <span>Hide</span>
             <strong>×</strong>
@@ -2308,8 +2383,8 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week) {
       <div class="fantasycast-scoreboard">
         ${fantasyCastTeamHeader_(home, homeScore, homeProjection, 'left')}
         <div class="fantasycast-center">
-          <span>CHANCE TO WIN</span>
-          <strong>${chance.home}% <em>VS</em> ${chance.away}%</strong>
+          <span>${isComplete ? 'FINAL' : 'CHANCE TO WIN'}</span>
+          <strong>${isComplete ? `${number2(homeScore)} <em>VS</em> ${number2(awayScore)}` : `${chance.home}% <em>VS</em> ${chance.away}%`}</strong>
         </div>
         ${fantasyCastTeamHeader_(away, awayScore, awayProjection, 'right')}
       </div>
@@ -2352,6 +2427,14 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week) {
   const closeButton = container.querySelector('[data-fantasycast-close]');
   if (closeButton) {
     closeButton.addEventListener('click', () => hideBattleFantasyCast_());
+  }
+
+  const refreshButton = container.querySelector('[data-fantasycast-refresh]');
+  if (refreshButton) {
+    refreshButton.addEventListener('click', () => {
+      state.battleCastCache.clear();
+      loadBattleFantasyCast_(true);
+    });
   }
 
   updateBattleCastSelectionUi_();
@@ -2506,11 +2589,21 @@ function battlePlayerStatusLabel_(player) {
     return { text: `LIVE${period ? ` · Q${period}` : ''}${clock ? ` ${clock}` : ''}`, className: 'is-live' };
   }
   if (status === 'FINAL' || status === 'POST') {
-    return { text: 'FINAL', className: 'is-final' };
+    return { text: 'COMPLETED', className: 'is-final' };
   }
 
   const kickoff = player.kickoff || player.gameTime || player.startTime || '';
-  return { text: kickoff ? String(kickoff) : 'UPCOMING', className: 'is-upcoming' };
+  if (kickoff) {
+    const date = new Date(kickoff);
+    if (!Number.isNaN(date.getTime())) {
+      const day = date.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+      const md = date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+      const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      return { text: `${day} ${md} · ${time}`, className: 'is-upcoming' };
+    }
+  }
+
+  return { text: 'UPCOMING', className: 'is-upcoming' };
 }
 
 function battlePlayerOpponent_(player) {
