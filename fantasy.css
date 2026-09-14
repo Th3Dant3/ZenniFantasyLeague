@@ -5730,3 +5730,298 @@ main {
   font-size: 16px;
   line-height: 1;
 }
+
+
+/* =========================================================
+   WEEKLY TEAM GRADES
+   ========================================================= */
+.team-grades-section {
+  margin-top: 18px;
+  padding: 18px;
+}
+
+.team-grades-heading {
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+
+.team-grades-heading p {
+  max-width: 720px;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.team-grades-wrap {
+  min-height: 180px;
+}
+
+.team-grades-loading {
+  display: flex;
+  min-height: 180px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--text);
+  text-align: center;
+}
+
+.team-grades-loading span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.team-grades-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255,255,255,.025);
+}
+
+.team-grades-note > span {
+  flex: 0 0 auto;
+  color: var(--gold);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: .10em;
+}
+
+.team-grades-note.is-live > span {
+  color: #63e6a5;
+}
+
+.team-grades-note p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.team-grades-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 11px;
+}
+
+.team-grade-card {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(245,183,40,.06), transparent 34%),
+    rgba(255,255,255,.018);
+}
+
+.team-grade-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: rgba(255,255,255,.12);
+  content: '';
+}
+
+.team-grade-card.grade-Aplus::before,
+.team-grade-card.grade-A::before,
+.team-grade-card.grade-Aminus::before { background: #63e6a5; }
+.team-grade-card.grade-Bplus::before,
+.team-grade-card.grade-B::before,
+.team-grade-card.grade-Bminus::before { background: #f5b728; }
+.team-grade-card.grade-Cplus::before,
+.team-grade-card.grade-C::before,
+.team-grade-card.grade-Cminus::before { background: #f0a35b; }
+.team-grade-card.grade-Dplus::before,
+.team-grade-card.grade-D::before,
+.team-grade-card.grade-Dminus::before,
+.team-grade-card.grade-F::before { background: #ff6b6b; }
+
+.team-grade-card.is-pending {
+  opacity: .68;
+}
+
+.team-grade-top,
+.team-grade-team {
+  display: flex;
+  align-items: center;
+}
+
+.team-grade-top {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.team-grade-team {
+  min-width: 0;
+  gap: 9px;
+}
+
+.team-grade-team img {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  object-fit: contain;
+}
+
+.team-grade-team > div {
+  min-width: 0;
+}
+
+.team-grade-team strong,
+.team-grade-team span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-grade-team strong {
+  font-size: 11px;
+}
+
+.team-grade-team span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 7px;
+}
+
+.team-grade-letter {
+  display: grid;
+  place-items: center;
+  min-width: 48px;
+  height: 48px;
+  padding: 0 8px;
+  border: 1px solid rgba(245,183,40,.26);
+  border-radius: 12px;
+  background: rgba(245,183,40,.08);
+  color: var(--gold);
+  font-family: var(--display-font, inherit);
+  font-size: 23px;
+  font-weight: 900;
+}
+
+.team-grade-card.grade-Aplus .team-grade-letter,
+.team-grade-card.grade-A .team-grade-letter,
+.team-grade-card.grade-Aminus .team-grade-letter {
+  border-color: rgba(99,230,165,.26);
+  background: rgba(99,230,165,.08);
+  color: #63e6a5;
+}
+
+.team-grade-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.team-grade-metrics > div {
+  min-width: 0;
+  padding: 8px 7px;
+  border: 1px solid rgba(255,255,255,.055);
+  border-radius: 9px;
+  background: rgba(0,0,0,.12);
+}
+
+.team-grade-metrics small,
+.team-grade-metrics strong {
+  display: block;
+}
+
+.team-grade-metrics small {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 6px;
+  font-weight: 900;
+  letter-spacing: .08em;
+}
+
+.team-grade-metrics strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-grade-metrics strong.is-positive { color: #63e6a5; }
+.team-grade-metrics strong.is-negative { color: #ff7b7b; }
+
+.team-grade-efficiency {
+  margin-top: 10px;
+}
+
+.team-grade-efficiency > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 7px;
+}
+
+.team-grade-efficiency strong {
+  color: var(--text);
+}
+
+.team-grade-bar {
+  overflow: hidden;
+  height: 4px;
+  margin-top: 5px;
+  border-radius: 99px;
+  background: rgba(255,255,255,.07);
+}
+
+.team-grade-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f5b728, #63e6a5);
+}
+
+.team-grade-reason {
+  min-height: 28px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+@media (max-width: 1100px) {
+  .team-grades-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {
+  .team-grades-section { padding: 13px; }
+  .team-grades-heading { gap: 10px; }
+  .team-grades-heading p { font-size: 8px; }
+  .team-grades-note { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .team-grades-grid { grid-template-columns: 1fr; }
+  .team-grade-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+
+/* ================================
+   WEEKLY TEAM GRADES - OWN TAB
+   ================================ */
+.grades-view {
+  padding: 22px 14px 48px;
+}
+
+.team-grades-tab-section {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .grades-view {
+    padding: 14px 10px 32px;
+  }
+}

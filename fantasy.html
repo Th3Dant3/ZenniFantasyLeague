@@ -82,6 +82,7 @@
       <nav class="topnav" aria-label="Primary">
         <button class="nav-tab is-active" type="button" data-tab="overview">Overview</button>
         <button class="nav-tab battle-nav" type="button" data-tab="battle">Battle Center</button>
+        <button class="nav-tab" type="button" data-tab="grades">Grades</button>
         <button class="nav-tab" type="button" data-tab="standings">Standings</button>
         <button class="nav-tab" type="button" data-tab="teams">Teams</button>
         <button class="nav-tab draft-nav" type="button" data-tab="draft">Draft Day</button>
@@ -96,6 +97,7 @@
     <div class="mobile-tabs" aria-label="League sections">
       <button class="mobile-tab is-active" type="button" data-tab="overview">Overview</button>
       <button class="mobile-tab battle-nav" type="button" data-tab="battle">⚔ Battle</button>
+      <button class="mobile-tab" type="button" data-tab="grades">Grades</button>
       <button class="mobile-tab" type="button" data-tab="standings">Standings</button>
       <button class="mobile-tab" type="button" data-tab="teams">Teams</button>
       <button class="mobile-tab draft-nav" type="button" data-tab="draft">Draft</button>
@@ -257,6 +259,20 @@
           </div>
 
           <div class="battle-grid" id="battleGrid"></div>
+        </section>
+      </section>
+
+      <section class="view-panel grades-view" data-view="grades">
+        <section class="feature-card team-grades-section team-grades-tab-section">
+          <div class="section-heading compact-heading team-grades-heading">
+            <div>
+              <span class="section-kicker">Weekly Report Card</span>
+              <h2>Team Grades</h2>
+              <p>Grades reward scoring, beating projection, matchup performance and lineup decisions — not just wins and losses.</p>
+            </div>
+            <span class="performers-week" id="teamGradesWeekLabel">Week 1</span>
+          </div>
+          <div id="weeklyTeamGrades" class="team-grades-wrap skeleton-block"></div>
         </section>
       </section>
 

@@ -136,7 +136,10 @@ const state = {
   selectedWeek: 1,
   weekCache: new Map(),
   playerPerformanceCache: new Map(),
+  weekRosterCache: new Map(),
+  teamGradeCache: new Map(),
   performerRequestToken: 0,
+  teamGradeRequestToken: 0,
   activeView: 'overview',
   draft: null,
   draftCountdownTimer: null,
@@ -575,7 +578,7 @@ function bindUi() {
 }
 
 function switchView(view) {
-  const nextView = ['overview', 'battle', 'standings', 'teams', 'draft'].includes(view)
+  const nextView = ['overview', 'battle', 'grades', 'standings', 'teams', 'draft'].includes(view)
     ? view
     : 'overview';
 
@@ -957,6 +960,7 @@ function renderWeek(matchups, week) {
   renderBattleCenter(matchups, week);
   renderLeaguePulse(matchups, week);
   renderOverviewTopStats(week);
+  renderWeeklyTeamGrades(matchups, week);
 }
 
 function syncWeekLabels(week) {
@@ -1023,6 +1027,38 @@ function renderOverviewTopStats(week = state.selectedWeek) {
   loadTopPerformers(Number(week));
 }
 
+async function getWeekRosterSnapshots_(week) {
+  const key = Number(week || 1);
+
+  if (state.weekRosterCache.has(key)) {
+    return state.weekRosterCache.get(key);
+  }
+
+  const request = Promise.allSettled(
+    state.teams.map(async team => {
+      const data = await jsonp('roster', { teamId: team.id, week: key });
+      return {
+        team,
+        data: data || {},
+        roster: Array.isArray(data && data.roster) ? data.roster : []
+      };
+    })
+  ).then(results => {
+    const snapshots = results
+      .filter(result => result.status === 'fulfilled')
+      .map(result => result.value);
+
+    state.weekRosterCache.set(key, snapshots);
+    return snapshots;
+  }).catch(error => {
+    state.weekRosterCache.delete(key);
+    throw error;
+  });
+
+  state.weekRosterCache.set(key, request);
+  return request;
+}
+
 async function loadTopPerformers(week) {
   const container = document.getElementById('overviewTopStats');
   if (!container) return;
@@ -1031,22 +1067,11 @@ async function loadTopPerformers(week) {
 
   try {
     if (!state.playerPerformanceCache.has(week)) {
-      const rosterResponses = await Promise.allSettled(
-        state.teams.map(async team => {
-          const data = await jsonp('roster', { teamId: team.id, week });
-          return {
-            team,
-            roster: Array.isArray(data && data.roster) ? data.roster : []
-          };
-        })
-      );
-
+      const rosterSnapshots = await getWeekRosterSnapshots_(week);
       const playerPool = [];
 
-      rosterResponses.forEach(result => {
-        if (result.status !== 'fulfilled') return;
-
-        const { team, roster } = result.value;
+      rosterSnapshots.forEach(snapshot => {
+        const { team, roster } = snapshot;
         roster.forEach(player => {
           const points = getWeeklyPlayerPoints(player, week);
           const position = normalizeFantasyPosition(player.position || player.lineupSlot);
@@ -1685,6 +1710,298 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
       </div>
     </div>
   `).join('');
+}
+
+
+async function renderWeeklyTeamGrades(matchups = state.currentMatchups, week = state.selectedWeek) {
+  const container = document.getElementById('weeklyTeamGrades');
+  const weekLabel = document.getElementById('teamGradesWeekLabel');
+  if (!container) return;
+
+  const requestToken = ++state.teamGradeRequestToken;
+  const safeWeek = Number(week || 1);
+  if (weekLabel) weekLabel.textContent = `Week ${safeWeek}`;
+
+  container.classList.add('skeleton-block');
+  container.innerHTML = `
+    <div class="team-grades-loading">
+      <strong>Building Week ${escapeHtml(String(safeWeek))} report cards...</strong>
+      <span>Score vs projection · league rank · matchup result · lineup efficiency</span>
+    </div>
+  `;
+
+  try {
+    const rosterSnapshots = await getWeekRosterSnapshots_(safeWeek);
+    if (requestToken !== state.teamGradeRequestToken || Number(state.selectedWeek) !== safeWeek) return;
+
+    const rosterByTeam = new Map(
+      rosterSnapshots.map(snapshot => [Number(snapshot.team.id), snapshot])
+    );
+
+    const games = Array.isArray(matchups) ? matchups : [];
+    const allScores = [];
+
+    games.forEach(match => {
+      allScores.push({ teamId: Number(match.homeTeamId), score: Number(match.homeScore || 0) });
+      allScores.push({ teamId: Number(match.awayTeamId), score: Number(match.awayScore || 0) });
+    });
+
+    const rankedScores = allScores
+      .slice()
+      .sort((a, b) => b.score - a.score || a.teamId - b.teamId);
+
+    const weeklyRank = new Map();
+    rankedScores.forEach((row, index) => weeklyRank.set(row.teamId, index + 1));
+
+    const reports = [];
+    let completeCount = 0;
+
+    games.forEach(match => {
+      const homeId = Number(match.homeTeamId);
+      const awayId = Number(match.awayTeamId);
+      const homeSnapshot = rosterByTeam.get(homeId);
+      const awaySnapshot = rosterByTeam.get(awayId);
+      const starterSummary = homeSnapshot && awaySnapshot
+        ? battleStarterStatusSummary_(homeSnapshot.roster, awaySnapshot.roster)
+        : { complete: String(match.status || '').toUpperCase() === 'COMPLETED' };
+
+      const isComplete = Boolean(starterSummary.complete) || ['COMPLETED', 'FINAL', 'POST'].includes(String(match.status || '').toUpperCase());
+      if (isComplete) completeCount += 1;
+
+      reports.push(buildTeamGradeReport_(match, 'home', homeSnapshot, awaySnapshot, isComplete, weeklyRank, allScores.length));
+      reports.push(buildTeamGradeReport_(match, 'away', awaySnapshot, homeSnapshot, isComplete, weeklyRank, allScores.length));
+    });
+
+    const weekComplete = games.length > 0 && completeCount === games.length;
+
+    reports.sort((a, b) => {
+      if (a.pending !== b.pending) return a.pending ? 1 : -1;
+      if (!a.pending && !b.pending && b.gradeScore !== a.gradeScore) return b.gradeScore - a.gradeScore;
+      return a.rank - b.rank;
+    });
+
+    container.classList.remove('skeleton-block');
+    container.innerHTML = `
+      <div class="team-grades-note ${weekComplete ? 'is-locked' : 'is-live'}">
+        <span>${weekComplete ? '✓ FINAL WEEKLY GRADES' : '● PROVISIONAL GRADES'}</span>
+        <p>${weekComplete
+          ? `Week ${safeWeek} is complete. Grades are locked from the final matchup results.`
+          : `Grades lock after every Week ${safeWeek} matchup is completed. Teams still playing remain pending.`}</p>
+      </div>
+      <div class="team-grades-grid">
+        ${reports.map(report => teamGradeCard_(report, weekComplete)).join('')}
+      </div>
+    `;
+  } catch (error) {
+    if (requestToken !== state.teamGradeRequestToken) return;
+    container.classList.remove('skeleton-block');
+    container.innerHTML = `
+      <div class="team-grades-loading is-error">
+        <strong>Unable to build weekly grades.</strong>
+        <span>${escapeHtml(error.message || String(error))}</span>
+      </div>
+    `;
+  }
+}
+
+function buildTeamGradeReport_(match, side, snapshot, opponentSnapshot, isComplete, weeklyRank, teamCount) {
+  const isHome = side === 'home';
+  const teamId = Number(isHome ? match.homeTeamId : match.awayTeamId);
+  const opponentId = Number(isHome ? match.awayTeamId : match.homeTeamId);
+  const team = state.teamMap.get(teamId) || (snapshot && snapshot.team) || null;
+  const opponent = state.teamMap.get(opponentId) || (opponentSnapshot && opponentSnapshot.team) || null;
+  const score = Number(isHome ? match.homeScore || 0 : match.awayScore || 0);
+  const opponentScore = Number(isHome ? match.awayScore || 0 : match.homeScore || 0);
+  const rank = Number(weeklyRank.get(teamId) || teamCount || 12);
+  const roster = snapshot && Array.isArray(snapshot.roster) ? snapshot.roster : [];
+  const lineup = normalizeBattleLineup_(roster);
+  const starters = lineup.starters.filter(Boolean);
+  const projection = rosterProjectionTotal_(starters);
+  const optimal = calculateOptimalLineupScore_(roster);
+  const efficiency = optimal > 0 ? Math.min(100, (score / optimal) * 100) : 100;
+  const ratio = projection > 0 ? score / projection : 1;
+  const margin = Math.abs(score - opponentScore);
+  const result = score > opponentScore ? 'W' : score < opponentScore ? 'L' : 'T';
+
+  if (!isComplete) {
+    return {
+      pending: true,
+      teamId,
+      team,
+      opponent,
+      score,
+      projection,
+      ratio,
+      rank,
+      result,
+      margin,
+      efficiency,
+      grade: '—',
+      gradeScore: -1,
+      reason: 'Matchup still in progress or waiting for kickoff.'
+    };
+  }
+
+  const projectionComponent = clampGrade_(75 + ((ratio - 1) * 125), 0, 100);
+  const rankComponent = teamCount > 1
+    ? clampGrade_(100 - (((rank - 1) / (teamCount - 1)) * 100), 0, 100)
+    : 100;
+
+  let resultComponent = 62;
+  if (result === 'W') resultComponent = clampGrade_(78 + (margin * 0.55), 78, 100);
+  if (result === 'L') resultComponent = clampGrade_(62 - (margin * 0.30), 45, 62);
+
+  const efficiencyComponent = clampGrade_(efficiency, 0, 100);
+  const gradeScore =
+    (projectionComponent * 0.45) +
+    (rankComponent * 0.30) +
+    (resultComponent * 0.15) +
+    (efficiencyComponent * 0.10);
+
+  const grade = gradeLetter_(gradeScore);
+  const reason = buildGradeReason_({
+    score,
+    projection,
+    ratio,
+    rank,
+    result,
+    margin,
+    efficiency,
+    opponent
+  });
+
+  return {
+    pending: false,
+    teamId,
+    team,
+    opponent,
+    score,
+    projection,
+    ratio,
+    rank,
+    result,
+    margin,
+    efficiency,
+    grade,
+    gradeScore,
+    reason
+  };
+}
+
+function calculateOptimalLineupScore_(roster) {
+  const players = (Array.isArray(roster) ? roster : [])
+    .filter(player => !isBattleIrPlayer_(player))
+    .map(player => ({
+      player,
+      position: normalizeFantasyPosition(player.position || player.lineupSlot),
+      points: battlePlayerActualPoints_(player) || 0
+    }));
+
+  const pickTop = (position, count) => players
+    .filter(item => item.position === position)
+    .sort((a, b) => b.points - a.points)
+    .slice(0, count);
+
+  const selected = [];
+  const fixedGroups = [
+    ['QB', 1], ['RB', 2], ['WR', 2], ['TE', 1], ['K', 1], ['DST', 1]
+  ];
+
+  fixedGroups.forEach(([position, count]) => {
+    pickTop(position, count).forEach(item => selected.push(item));
+  });
+
+  const selectedPlayers = new Set(selected.map(item => item.player));
+  const flex = players
+    .filter(item => ['RB', 'WR', 'TE'].includes(item.position) && !selectedPlayers.has(item.player))
+    .sort((a, b) => b.points - a.points)
+    .slice(0, 2);
+
+  selected.push(...flex);
+  return selected.reduce((sum, item) => sum + Number(item.points || 0), 0);
+}
+
+function clampGrade_(value, min, max) {
+  return Math.min(max, Math.max(min, Number(value || 0)));
+}
+
+function gradeLetter_(score) {
+  const value = Number(score || 0);
+  if (value >= 95) return 'A+';
+  if (value >= 90) return 'A';
+  if (value >= 87) return 'A-';
+  if (value >= 84) return 'B+';
+  if (value >= 80) return 'B';
+  if (value >= 76) return 'B-';
+  if (value >= 72) return 'C+';
+  if (value >= 68) return 'C';
+  if (value >= 64) return 'C-';
+  if (value >= 60) return 'D+';
+  if (value >= 55) return 'D';
+  if (value >= 50) return 'D-';
+  return 'F';
+}
+
+function buildGradeReason_(report) {
+  const pieces = [];
+  const pct = (report.ratio - 1) * 100;
+
+  if (pct >= 20) pieces.push(`Crushed projection by ${Math.abs(pct).toFixed(0)}%`);
+  else if (pct >= 5) pieces.push(`Beat projection by ${Math.abs(pct).toFixed(0)}%`);
+  else if (pct <= -20) pieces.push(`Finished ${Math.abs(pct).toFixed(0)}% below projection`);
+  else if (pct <= -5) pieces.push(`Missed projection by ${Math.abs(pct).toFixed(0)}%`);
+  else pieces.push('Finished close to projection');
+
+  if (report.rank <= 3) pieces.push(`#${report.rank} scoring team`);
+  else if (report.rank >= 10) pieces.push(`#${report.rank} in weekly scoring`);
+
+  if (report.result === 'W') pieces.push(`won by ${number2(report.margin)}`);
+  if (report.result === 'L') pieces.push(`lost by ${number2(report.margin)}`);
+
+  if (report.efficiency >= 95) pieces.push('excellent lineup efficiency');
+  else if (report.efficiency < 80) pieces.push('left meaningful points on the bench');
+
+  return pieces.slice(0, 3).join(' · ') + '.';
+}
+
+function teamGradeCard_(report, weekComplete) {
+  const team = report.team;
+  const icon = team ? getTeamIcon(team) : '';
+  const projectionDelta = report.projection > 0 ? ((report.score / report.projection) - 1) * 100 : 0;
+  const resultText = report.result === 'W'
+    ? `WIN +${number2(report.margin)}`
+    : report.result === 'L'
+      ? `LOSS -${number2(report.margin)}`
+      : 'TIE';
+
+  return `
+    <article class="team-grade-card ${report.pending ? 'is-pending' : `grade-${String(report.grade).replace('+', 'plus').replace('-', 'minus')}`}" data-team-grade="${escapeAttr(String(report.teamId))}">
+      <div class="team-grade-top">
+        <div class="team-grade-team">
+          ${team ? `<img class="${teamIconClass(team)}" src="${escapeAttr(icon)}" alt="" ${teamIconFallbackAttr(team)}>` : ''}
+          <div>
+            <strong>${escapeHtml(team ? team.name : 'Unknown Team')}</strong>
+            <span>${escapeHtml(team ? ownerText(team) : '')}</span>
+          </div>
+        </div>
+        <div class="team-grade-letter">${escapeHtml(report.grade)}</div>
+      </div>
+
+      <div class="team-grade-metrics">
+        <div><small>SCORE</small><strong>${number2(report.score)}</strong></div>
+        <div><small>VS PROJ</small><strong class="${projectionDelta >= 0 ? 'is-positive' : 'is-negative'}">${report.projection > 0 ? `${projectionDelta >= 0 ? '+' : ''}${projectionDelta.toFixed(0)}%` : '—'}</strong></div>
+        <div><small>RESULT</small><strong>${report.pending ? 'PENDING' : resultText}</strong></div>
+        <div><small>${weekComplete ? 'WEEK RANK' : 'CURRENT RANK'}</small><strong>#${escapeHtml(String(report.rank))}</strong></div>
+      </div>
+
+      <div class="team-grade-efficiency">
+        <div><span>Lineup efficiency</span><strong>${report.pending ? '—' : `${report.efficiency.toFixed(0)}%`}</strong></div>
+        <div class="team-grade-bar"><i style="width:${report.pending ? 0 : Math.min(100, report.efficiency).toFixed(0)}%"></i></div>
+      </div>
+
+      <p class="team-grade-reason">${escapeHtml(report.reason)}</p>
+    </article>
+  `;
 }
 
 async function changeWeek(delta) {
