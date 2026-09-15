@@ -83,6 +83,7 @@
         <button class="nav-tab is-active" type="button" data-tab="overview">Overview</button>
         <button class="nav-tab battle-nav" type="button" data-tab="battle">Battle Center</button>
         <button class="nav-tab" type="button" data-tab="grades">Grades</button>
+        <button class="nav-tab" type="button" data-tab="awards">Weekly Awards</button>
         <button class="nav-tab" type="button" data-tab="standings">Standings</button>
         <button class="nav-tab" type="button" data-tab="teams">Teams</button>
         <button class="nav-tab draft-nav" type="button" data-tab="draft">Draft Day</button>
@@ -98,6 +99,7 @@
       <button class="mobile-tab is-active" type="button" data-tab="overview">Overview</button>
       <button class="mobile-tab battle-nav" type="button" data-tab="battle">⚔ Battle</button>
       <button class="mobile-tab" type="button" data-tab="grades">Grades</button>
+      <button class="mobile-tab" type="button" data-tab="awards">Awards</button>
       <button class="mobile-tab" type="button" data-tab="standings">Standings</button>
       <button class="mobile-tab" type="button" data-tab="teams">Teams</button>
       <button class="mobile-tab draft-nav" type="button" data-tab="draft">Draft</button>
@@ -144,28 +146,18 @@
             </div>
           </section>
 
-          <div class="overview-stats-row">
-            <section class="feature-card top-stats-card top-performers-card">
+          <div class="overview-stats-row overview-records-row">
+            <section class="feature-card top-stats-card top-performers-card all-time-performers-card">
               <div class="section-heading compact-heading performers-heading">
                 <div>
-                  <span class="section-kicker">Weekly Leaders</span>
-                  <h2>Top Performers</h2>
+                  <span class="section-kicker">All-Time Leaders</span>
+                  <h2>Top Performances</h2>
+                  <p class="performers-subtitle">Top 5 single-game starter performances of the 2026 season</p>
                 </div>
-                <span class="performers-week" id="performersWeekLabel">Week 1</span>
+                <span class="performers-week season-record-chip">2026 Season</span>
               </div>
               <div class="top-stats-grid performers-grid skeleton-block" id="overviewTopStats"></div>
             </section>
-
-            <article class="feature-card pulse-card command-pulse-card weekly-spotlight-card">
-              <div class="section-heading compact-heading">
-                <div>
-                  <span class="section-kicker">Weekly Spotlight</span>
-                  <h2>Team Performance</h2>
-                </div>
-                <button class="panel-link" type="button" data-tab-open="battle">View Battles →</button>
-              </div>
-              <div id="leaguePulse" class="pulse-list weekly-spotlight-list skeleton-block"></div>
-            </article>
 
             <article class="feature-card spotlight-card" id="championSpotlight"></article>
           </div>
@@ -262,6 +254,47 @@
         </section>
       </section>
 
+      <section class="view-panel awards-view" data-view="awards">
+        <section class="section-block weekly-awards-shell">
+          <div class="section-heading weekly-awards-heading">
+            <div>
+              <span class="section-kicker">Zenni Weekly Honors</span>
+              <h2>Weekly Awards</h2>
+              <p>Go back through every week for player leaders, team of the week, biggest win, closest battle and shootout.</p>
+            </div>
+            <div class="week-selector awards-week-selector">
+              <button type="button" class="week-button" id="awardsPrevWeek" aria-label="Previous awards week">‹</button>
+              <div><span>Week</span><strong id="awardsWeekLabel">1</strong></div>
+              <button type="button" class="week-button" id="awardsNextWeek" aria-label="Next awards week">›</button>
+            </div>
+          </div>
+
+          <div class="weekly-awards-grid">
+            <section class="feature-card top-stats-card top-performers-card awards-performers-card">
+              <div class="section-heading compact-heading performers-heading">
+                <div>
+                  <span class="section-kicker">Weekly Leaders</span>
+                  <h2>Top Performers</h2>
+                  <p class="performers-subtitle">Top 5 starters by position</p>
+                </div>
+              </div>
+              <div class="top-stats-grid performers-grid skeleton-block" id="awardsTopStats"></div>
+            </section>
+
+            <article class="feature-card pulse-card command-pulse-card weekly-spotlight-card awards-spotlight-card">
+              <div class="section-heading compact-heading">
+                <div>
+                  <span class="section-kicker">Weekly Spotlight</span>
+                  <h2>Team Performance</h2>
+                </div>
+                <button class="panel-link" type="button" data-tab-open="battle">View Battles →</button>
+              </div>
+              <div id="awardsLeaguePulse" class="pulse-list weekly-spotlight-list skeleton-block"></div>
+            </article>
+          </div>
+        </section>
+      </section>
+
       <section class="view-panel grades-view" data-view="grades">
         <section class="feature-card team-grades-section team-grades-tab-section">
           <div class="section-heading compact-heading team-grades-heading">
@@ -270,7 +303,10 @@
               <h2>Team Grades</h2>
               <p>Grades reward scoring, beating projection, matchup performance and lineup decisions — not just wins and losses.</p>
             </div>
-            <span class="performers-week" id="teamGradesWeekLabel">Week 1</span>
+            <div class="grades-week-control">
+              <span class="performers-week" id="teamGradesWeekLabel">Week 1</span>
+              <div class="grades-week-tabs" id="gradesWeekTabs" aria-label="Select grades week"></div>
+            </div>
           </div>
           <div id="weeklyTeamGrades" class="team-grades-wrap skeleton-block"></div>
         </section>

@@ -139,6 +139,12 @@ const state = {
   weekRosterCache: new Map(),
   teamGradeCache: new Map(),
   performerRequestToken: 0,
+  topPerformerPosition: 'ALL',
+  awardsWeek: 1,
+  gradesWeek: 1,
+  awardsPerformerPosition: 'ALL',
+  allTimePerformerPosition: 'ALL',
+  allTimePerformanceCache: null,
   teamGradeRequestToken: 0,
   activeView: 'overview',
   draft: null,
@@ -569,6 +575,15 @@ function bindUi() {
   document.getElementById('battlePrevWeek').addEventListener('click', () => changeWeek(-1));
   document.getElementById('battleNextWeek').addEventListener('click', () => changeWeek(1));
 
+  document.getElementById('awardsPrevWeek')?.addEventListener('click', () => changeAwardsWeek_(-1));
+  document.getElementById('awardsNextWeek')?.addEventListener('click', () => changeAwardsWeek_(1));
+
+  document.getElementById('gradesWeekTabs')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-grades-week]');
+    if (!button || button.disabled) return;
+    changeGradesWeek_(Number(button.dataset.gradesWeek || 1));
+  });
+
   const modal = document.getElementById('teamModal');
   document.getElementById('modalClose').addEventListener('click', () => modal.close());
 
@@ -578,7 +593,7 @@ function bindUi() {
 }
 
 function switchView(view) {
-  const nextView = ['overview', 'battle', 'grades', 'standings', 'teams', 'draft'].includes(view)
+  const nextView = ['overview', 'battle', 'grades', 'awards', 'standings', 'teams', 'draft'].includes(view)
     ? view
     : 'overview';
 
@@ -595,6 +610,14 @@ function switchView(view) {
   });
 
   window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  if (nextView === 'awards') {
+    renderWeeklyAwards_(state.awardsWeek || getDefaultAwardsWeek_());
+  }
+
+  if (nextView === 'grades') {
+    changeGradesWeek_(state.gradesWeek || Number(state.league && state.league.currentWeek || 1), true);
+  }
 
   if (nextView === 'battle') {
     animateBattleEntrance();
@@ -949,6 +972,10 @@ function renderAll() {
   renderStandingsPreview();
   renderTeamGallery();
   renderGlanceRibbon();
+  state.awardsWeek = getDefaultAwardsWeek_();
+  state.gradesWeek = Number(state.league && state.league.currentWeek || state.selectedWeek || 1);
+  renderGradesWeekTabs_();
+  renderAllTimeTopStats_();
   renderWeek(state.currentMatchups, state.selectedWeek);
 }
 
@@ -958,9 +985,7 @@ function renderWeek(matchups, week) {
   renderOverviewMatchups(matchups, week);
   renderFeaturedMatchup(matchups, week);
   renderBattleCenter(matchups, week);
-  renderLeaguePulse(matchups, week);
-  renderOverviewTopStats(week);
-  renderWeeklyTeamGrades(matchups, week);
+  if (Number(state.gradesWeek || week) === Number(week)) renderWeeklyTeamGrades(matchups, week);
 }
 
 function syncWeekLabels(week) {
@@ -1009,6 +1034,164 @@ function renderChampionSpotlight() {
   `;
 }
 
+
+function getDefaultAwardsWeek_() {
+  const latest = Number(state.league && state.league.latestScoringPeriod || 0);
+  const current = Number(state.league && state.league.currentWeek || 1);
+  return Math.max(1, latest || Math.max(1, current - 1));
+}
+
+async function renderAllTimeTopStats_() {
+  const container = document.getElementById('overviewTopStats');
+  if (!container) return;
+
+  container.classList.add('skeleton-block');
+  container.innerHTML = `
+    <div class="performers-loading">
+      <strong>Building 2026 season record board...</strong>
+      <span>ALL · QB · RB · WR · TE · FLEX · K · D/ST</span>
+    </div>
+  `;
+
+  try {
+    const maxWeek = Math.max(
+      1,
+      Number(state.league && state.league.latestScoringPeriod || 0),
+      Number(state.league && state.league.currentWeek || 1)
+    );
+    const seasonPool = [];
+
+    for (let week = 1; week <= maxWeek; week += 1) {
+      const snapshots = await getWeekRosterSnapshots_(week);
+      snapshots.forEach(snapshot => {
+        const { team, roster } = snapshot;
+        roster.forEach(player => {
+          if (isBattleBenchPlayer_(player)) return;
+          const points = getWeeklyPlayerPoints(player, week);
+          const position = normalizeFantasyPosition(player.position || player.lineupSlot);
+          const lineupSlot = normalizeTopPerformerSlot_(player.lineupSlot || player.slot);
+          if (!position || points == null) return;
+          seasonPool.push({
+            playerId: Number(player.playerId || player.id || 0),
+            name: player.name || 'Unknown Player',
+            position,
+            lineupSlot,
+            points,
+            week,
+            nflTeam: getPlayerNflTeam(player),
+            fantasyTeam: team.name,
+            fantasyTeamId: Number(team.id)
+          });
+        });
+      });
+    }
+
+    state.allTimePerformanceCache = seasonPool;
+    container.classList.remove('skeleton-block');
+    renderAllTimePerformerLeaderboard_(container, seasonPool);
+  } catch (error) {
+    container.classList.remove('skeleton-block');
+    container.innerHTML = `<div class="performers-empty"><strong>Unable to load season records.</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
+  }
+}
+
+function renderAllTimePerformerLeaderboard_(container, playerPool) {
+  const categories = ['ALL', 'QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST'];
+  let active = String(state.allTimePerformerPosition || 'ALL').toUpperCase();
+  if (!categories.includes(active)) active = 'ALL';
+  state.allTimePerformerPosition = active;
+
+  const candidates = topPerformerCandidates_(playerPool, active)
+    .sort((a, b) => b.points - a.points || a.week - b.week || a.name.localeCompare(b.name));
+  const leaders = candidates.slice(0, 5);
+  const tabLabel = value => value === 'DST' ? 'D/ST' : value;
+
+  container.innerHTML = `
+    <div class="performer-tabs" role="tablist" aria-label="All-time performer position">
+      ${categories.map(category => `<button class="performer-tab ${category === active ? 'is-active' : ''}" type="button" data-alltime-position="${category}">${tabLabel(category)}</button>`).join('')}
+    </div>
+    <div class="performer-leaderboard-head"><span>${active === 'ALL' ? 'Top 5 Single-Game Performances' : `Top 5 ${tabLabel(active)} Performances`}</span><small>2026 season · starters only</small></div>
+    <div class="performer-leaderboard">
+      ${leaders.length ? leaders.map((leader, index) => `
+        <div class="performer-row ${index === 0 ? 'is-player-week' : ''}">
+          <div class="performer-rank">#${index + 1}</div>
+          <div class="performer-copy">
+            <div class="performer-name-line"><strong>${escapeHtml(leader.name)}</strong>${index === 0 ? '<span class="player-week-badge">Season Record</span>' : ''}</div>
+            <span>${escapeHtml(leader.position === 'DST' ? 'D/ST' : leader.position)} · ${escapeHtml(leader.fantasyTeam)} · Week ${leader.week}</span>
+          </div>
+          <div class="performer-points"><strong>${number2(leader.points)}</strong><small>PTS</small></div>
+        </div>`).join('') : `<div class="performers-empty compact"><strong>No qualifying records yet.</strong><span>Records appear after starter points are posted.</span></div>`}
+    </div>`;
+
+  container.querySelectorAll('[data-alltime-position]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.allTimePerformerPosition = String(button.dataset.alltimePosition || 'ALL').toUpperCase();
+      renderAllTimePerformerLeaderboard_(container, playerPool);
+    });
+  });
+}
+
+async function renderWeeklyAwards_(week) {
+  const safeWeek = Math.max(1, Number(week || 1));
+  state.awardsWeek = safeWeek;
+  const label = document.getElementById('awardsWeekLabel');
+  if (label) label.textContent = String(safeWeek);
+
+  const maxWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
+  const prev = document.getElementById('awardsPrevWeek');
+  const next = document.getElementById('awardsNextWeek');
+  if (prev) prev.disabled = safeWeek <= 1;
+  if (next) next.disabled = safeWeek >= maxWeek;
+
+  const performerContainer = document.getElementById('awardsTopStats');
+  if (performerContainer) {
+    performerContainer.classList.add('skeleton-block');
+    performerContainer.innerHTML = `<div class="performers-loading"><strong>Loading Week ${safeWeek} leaders...</strong><span>Top 5 starters by position</span></div>`;
+  }
+
+  try {
+    const [matchups, snapshots] = await Promise.all([getWeekMatchups(safeWeek), getWeekRosterSnapshots_(safeWeek)]);
+    renderLeaguePulse(matchups, safeWeek, 'awardsLeaguePulse');
+
+    const pool = [];
+    snapshots.forEach(snapshot => {
+      const { team, roster } = snapshot;
+      roster.forEach(player => {
+        if (isBattleBenchPlayer_(player)) return;
+        const points = getWeeklyPlayerPoints(player, safeWeek);
+        const position = normalizeFantasyPosition(player.position || player.lineupSlot);
+        const lineupSlot = normalizeTopPerformerSlot_(player.lineupSlot || player.slot);
+        if (!position || points == null) return;
+        pool.push({ playerId:Number(player.playerId || player.id || 0), name:player.name || 'Unknown Player', position, lineupSlot, points, nflTeam:getPlayerNflTeam(player), fantasyTeam:team.name, fantasyTeamId:Number(team.id) });
+      });
+    });
+
+    if (performerContainer) {
+      performerContainer.classList.remove('skeleton-block');
+      const previous = state.topPerformerPosition;
+      state.topPerformerPosition = state.awardsPerformerPosition || 'ALL';
+      renderTopPerformerLeaderboard_(performerContainer, safeWeek, pool);
+      state.awardsPerformerPosition = state.topPerformerPosition;
+      state.topPerformerPosition = previous;
+      performerContainer.querySelectorAll('[data-performer-position]').forEach(button => {
+        button.addEventListener('click', () => { state.awardsPerformerPosition = String(button.dataset.performerPosition || 'ALL').toUpperCase(); }, { capture:true });
+      });
+    }
+  } catch (error) {
+    if (performerContainer) {
+      performerContainer.classList.remove('skeleton-block');
+      performerContainer.innerHTML = `<div class="performers-empty"><strong>Unable to load Week ${safeWeek} awards.</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
+    }
+  }
+}
+
+async function changeAwardsWeek_(delta) {
+  const max = Math.max(1, Number(state.league && state.league.currentWeek || 1));
+  const next = Math.min(max, Math.max(1, Number(state.awardsWeek || 1) + Number(delta || 0)));
+  if (next === Number(state.awardsWeek || 1)) return;
+  await renderWeeklyAwards_(next);
+}
+
 function renderOverviewTopStats(week = state.selectedWeek) {
   const container = document.getElementById('overviewTopStats');
   const weekLabel = document.getElementById('performersWeekLabel');
@@ -1020,7 +1203,7 @@ function renderOverviewTopStats(week = state.selectedWeek) {
   container.innerHTML = `
     <div class="performers-loading">
       <strong>Loading weekly player leaders...</strong>
-      <span>QB · RB · WR · TE · K · DST</span>
+      <span>ALL · QB · RB · WR · TE · FLEX · K · D/ST</span>
     </div>
   `;
 
@@ -1034,26 +1217,38 @@ async function getWeekRosterSnapshots_(week) {
     return state.weekRosterCache.get(key);
   }
 
-  const request = Promise.allSettled(
-    state.teams.map(async team => {
-      const data = await jsonp('roster', { teamId: team.id, week: key });
-      return {
-        team,
-        data: data || {},
-        roster: Array.isArray(data && data.roster) ? data.roster : []
-      };
-    })
-  ).then(results => {
-    const snapshots = results
-      .filter(result => result.status === 'fulfilled')
-      .map(result => result.value);
+  // IMPORTANT: Awards/record boards now use ONE batched API call per week.
+  // The old build launched 12 roster JSONP requests at once. Apps Script
+  // throttled/timed out most of them, which is why only one fantasy team
+  // appeared in Top Performances.
+  const request = jsonp('performance', { week: key })
+    .then(data => {
+      const teamResults = Array.isArray(data && data.teams) ? data.teams : [];
+      const teamById = new Map(
+        (state.teams || []).map(team => [Number(team.id), team])
+      );
 
-    state.weekRosterCache.set(key, snapshots);
-    return snapshots;
-  }).catch(error => {
-    state.weekRosterCache.delete(key);
-    throw error;
-  });
+      const snapshots = teamResults.map(result => {
+        const teamId = Number(result && result.teamId || 0);
+        const team = teamById.get(teamId) || {
+          id: teamId,
+          name: `Team ${teamId}`
+        };
+
+        return {
+          team,
+          data: result || {},
+          roster: Array.isArray(result && result.roster) ? result.roster : []
+        };
+      });
+
+      state.weekRosterCache.set(key, snapshots);
+      return snapshots;
+    })
+    .catch(error => {
+      state.weekRosterCache.delete(key);
+      throw error;
+    });
 
   state.weekRosterCache.set(key, request);
   return request;
@@ -1072,15 +1267,23 @@ async function loadTopPerformers(week) {
 
       rosterSnapshots.forEach(snapshot => {
         const { team, roster } = snapshot;
+
         roster.forEach(player => {
+          // Weekly Top Performers is a STARTER leaderboard. Bench and IR
+          // performances do not qualify for Player of the Week.
+          if (isBattleBenchPlayer_(player)) return;
+
           const points = getWeeklyPlayerPoints(player, week);
           const position = normalizeFantasyPosition(player.position || player.lineupSlot);
+          const lineupSlot = normalizeTopPerformerSlot_(player.lineupSlot || player.slot);
 
           if (!position || points == null) return;
 
           playerPool.push({
+            playerId: Number(player.playerId || player.id || 0),
             name: player.name || 'Unknown Player',
             position,
+            lineupSlot,
             points,
             nflTeam: getPlayerNflTeam(player),
             fantasyTeam: team.name,
@@ -1092,74 +1295,22 @@ async function loadTopPerformers(week) {
       state.playerPerformanceCache.set(week, playerPool);
     }
 
-    if (requestToken !== state.performerRequestToken || Number(state.selectedWeek) !== Number(week)) {
-      return;
-    }
+    if (requestToken !== state.performerRequestToken || Number(state.selectedWeek) !== Number(week)) return;
 
     const playerPool = state.playerPerformanceCache.get(week) || [];
-    const positions = ['QB', 'RB', 'WR', 'TE', 'K', 'DST'];
-
-    const leaders = positions.map(position => {
-      return playerPool
-        .filter(player => player.position === position)
-        .sort((a, b) => b.points - a.points)[0] || null;
-    });
-
-    const available = leaders.filter(Boolean);
-
     container.classList.remove('skeleton-block');
 
-    if (!available.length) {
+    if (!playerPool.length) {
       container.innerHTML = `
         <div class="performers-empty">
           <strong>Player scoring is waiting on the API.</strong>
-          <span>The current roster feed does not include weekly fantasy points yet. The card will populate automatically once the roster response returns a weekly point value.</span>
+          <span>The leaderboard will populate when ESPN returns weekly starter points.</span>
         </div>
       `;
       return;
     }
 
-    const overall = available.slice().sort((a, b) => b.points - a.points)[0];
-
-    container.innerHTML = leaders.map((leader, index) => {
-      const position = positions[index];
-
-      if (!leader) {
-        return `
-          <div class="performer-row is-pending">
-            <div class="performer-position">${position}</div>
-            <div class="performer-copy">
-              <strong>Scoring pending</strong>
-              <span>Waiting for ESPN player points</span>
-            </div>
-            <div class="performer-points">—</div>
-          </div>
-        `;
-      }
-
-      const isPlayerOfWeek =
-        overall &&
-        leader.name === overall.name &&
-        leader.position === overall.position &&
-        Number(leader.points) === Number(overall.points);
-
-      return `
-        <div class="performer-row ${isPlayerOfWeek ? 'is-player-week' : ''}">
-          <div class="performer-position">${escapeHtml(position)}</div>
-          <div class="performer-copy">
-            <div class="performer-name-line">
-              <strong>${escapeHtml(leader.name)}</strong>
-              ${isPlayerOfWeek ? '<span class="player-week-badge">Player of Week</span>' : ''}
-            </div>
-            <span>${escapeHtml(leader.nflTeam)} · ${escapeHtml(leader.fantasyTeam)}</span>
-          </div>
-          <div class="performer-points">
-            <strong>${number2(leader.points)}</strong>
-            <small>PTS</small>
-          </div>
-        </div>
-      `;
-    }).join('');
+    renderTopPerformerLeaderboard_(container, week, playerPool);
   } catch (error) {
     if (requestToken !== state.performerRequestToken) return;
 
@@ -1171,6 +1322,89 @@ async function loadTopPerformers(week) {
       </div>
     `;
   }
+}
+
+function normalizeTopPerformerSlot_(value) {
+  const raw = String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (['FLEX', 'RB/WR/TE', 'WR/RB/TE', 'OP'].includes(raw)) return 'FLEX';
+  if (['D/ST', 'DST', 'DEF'].includes(raw)) return 'DST';
+  return raw;
+}
+
+function topPerformerCandidates_(playerPool, category) {
+  if (category === 'ALL') return playerPool.slice();
+  if (category === 'FLEX') return playerPool.filter(player => player.lineupSlot === 'FLEX');
+  return playerPool.filter(player => player.position === category);
+}
+
+function renderTopPerformerLeaderboard_(container, week, playerPool) {
+  const categories = ['ALL', 'QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST'];
+  let active = String(state.topPerformerPosition || 'ALL').toUpperCase();
+  if (!categories.includes(active)) active = 'ALL';
+  state.topPerformerPosition = active;
+
+  const overallLeader = playerPool.slice().sort((a, b) => b.points - a.points)[0] || null;
+  const leaders = topPerformerCandidates_(playerPool, active)
+    .sort((a, b) => b.points - a.points || a.name.localeCompare(b.name))
+    .slice(0, 5);
+
+  const tabLabel = value => value === 'DST' ? 'D/ST' : value;
+
+  container.innerHTML = `
+    <div class="performer-tabs" role="tablist" aria-label="Top performer position">
+      ${categories.map(category => `
+        <button
+          class="performer-tab ${category === active ? 'is-active' : ''}"
+          type="button"
+          role="tab"
+          aria-selected="${category === active ? 'true' : 'false'}"
+          data-performer-position="${category}"
+        >${tabLabel(category)}</button>
+      `).join('')}
+    </div>
+
+    <div class="performer-leaderboard-head">
+      <span>${active === 'ALL' ? 'Top 5 Starters Overall' : `Top 5 ${tabLabel(active)}`}</span>
+      <small>Week ${week} · starters only</small>
+    </div>
+
+    <div class="performer-leaderboard">
+      ${leaders.length ? leaders.map((leader, index) => {
+        const isPlayerOfWeek = overallLeader &&
+          leader.name === overallLeader.name &&
+          Number(leader.points) === Number(overallLeader.points);
+
+        return `
+          <div class="performer-row ${isPlayerOfWeek ? 'is-player-week' : ''}">
+            <div class="performer-rank">#${index + 1}</div>
+            <div class="performer-copy">
+              <div class="performer-name-line">
+                <strong>${escapeHtml(leader.name)}</strong>
+                ${isPlayerOfWeek ? '<span class="player-week-badge">Player of Week</span>' : ''}
+              </div>
+              <span>${escapeHtml(leader.position === 'DST' ? 'D/ST' : leader.position)} · ${escapeHtml(leader.nflTeam)} · ${escapeHtml(leader.fantasyTeam)}</span>
+            </div>
+            <div class="performer-points">
+              <strong>${number2(leader.points)}</strong>
+              <small>PTS</small>
+            </div>
+          </div>
+        `;
+      }).join('') : `
+        <div class="performers-empty compact">
+          <strong>No qualifying ${escapeHtml(tabLabel(active))} starters.</strong>
+          <span>Only players started in this category during Week ${week} are ranked.</span>
+        </div>
+      `}
+    </div>
+  `;
+
+  container.querySelectorAll('[data-performer-position]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.topPerformerPosition = String(button.dataset.performerPosition || 'ALL').toUpperCase();
+      renderTopPerformerLeaderboard_(container, week, playerPool);
+    });
+  });
 }
 
 function getWeeklyPlayerPoints(player, week) {
@@ -1571,8 +1805,8 @@ function featuredTeamMarkup(team, score, side) {
   `;
 }
 
-function renderLeaguePulse(matchups = state.currentMatchups, week = state.selectedWeek) {
-  const container = document.getElementById('leaguePulse');
+function renderLeaguePulse(matchups = state.currentMatchups, week = state.selectedWeek, containerId = 'leaguePulse') {
+  const container = document.getElementById(containerId);
   if (!container) return;
 
   const games = Array.isArray(matchups) ? matchups : [];
@@ -1713,6 +1947,49 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
 }
 
 
+
+function renderGradesWeekTabs_() {
+  const container = document.getElementById('gradesWeekTabs');
+  if (!container) return;
+
+  const currentWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
+  const selected = Math.min(currentWeek, Math.max(1, Number(state.gradesWeek || currentWeek)));
+  state.gradesWeek = selected;
+
+  container.innerHTML = Array.from({ length: currentWeek }, (_, index) => {
+    const week = index + 1;
+    return `<button type="button" class="grades-week-tab ${week === selected ? 'is-active' : ''}" data-grades-week="${week}" aria-pressed="${week === selected ? 'true' : 'false'}">Week ${week}</button>`;
+  }).join('');
+}
+
+async function changeGradesWeek_(week, force = false) {
+  const currentWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
+  const targetWeek = Math.min(currentWeek, Math.max(1, Number(week || currentWeek)));
+  if (!force && targetWeek === Number(state.gradesWeek || 0)) return;
+
+  state.gradesWeek = targetWeek;
+  renderGradesWeekTabs_();
+
+  const label = document.getElementById('teamGradesWeekLabel');
+  if (label) label.textContent = `Week ${targetWeek}`;
+
+  const container = document.getElementById('weeklyTeamGrades');
+  if (container) {
+    container.classList.add('skeleton-block');
+    container.innerHTML = `<div class="team-grades-loading"><strong>Loading Week ${targetWeek} grades...</strong><span>Retrieving the saved matchup and starter results.</span></div>`;
+  }
+
+  try {
+    const matchups = await getWeekMatchups(targetWeek);
+    if (Number(state.gradesWeek) !== targetWeek) return;
+    await renderWeeklyTeamGrades(matchups, targetWeek);
+  } catch (error) {
+    if (Number(state.gradesWeek) !== targetWeek || !container) return;
+    container.classList.remove('skeleton-block');
+    container.innerHTML = `<div class="team-grades-loading is-error"><strong>Unable to load Week ${targetWeek} grades.</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
+  }
+}
+
 async function renderWeeklyTeamGrades(matchups = state.currentMatchups, week = state.selectedWeek) {
   const container = document.getElementById('weeklyTeamGrades');
   const weekLabel = document.getElementById('teamGradesWeekLabel');
@@ -1720,6 +1997,8 @@ async function renderWeeklyTeamGrades(matchups = state.currentMatchups, week = s
 
   const requestToken = ++state.teamGradeRequestToken;
   const safeWeek = Number(week || 1);
+  state.gradesWeek = safeWeek;
+  renderGradesWeekTabs_();
   if (weekLabel) weekLabel.textContent = `Week ${safeWeek}`;
 
   container.classList.add('skeleton-block');
@@ -1732,7 +2011,7 @@ async function renderWeeklyTeamGrades(matchups = state.currentMatchups, week = s
 
   try {
     const rosterSnapshots = await getWeekRosterSnapshots_(safeWeek);
-    if (requestToken !== state.teamGradeRequestToken || Number(state.selectedWeek) !== safeWeek) return;
+    if (requestToken !== state.teamGradeRequestToken || Number(state.gradesWeek) !== safeWeek) return;
 
     const rosterByTeam = new Map(
       rosterSnapshots.map(snapshot => [Number(snapshot.team.id), snapshot])

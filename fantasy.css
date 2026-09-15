@@ -6025,3 +6025,315 @@ main {
     padding: 14px 10px 32px;
   }
 }
+
+
+/* =========================================================
+   WEEKLY TOP 5 PER POSITION v3
+   Starter-only Zenni League leaderboard
+   ========================================================= */
+.performers-subtitle {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.top-stats-grid.performers-grid {
+  gap: 10px;
+}
+
+.performer-tabs {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  overflow-x: auto;
+  padding: 1px 0 4px;
+  scrollbar-width: none;
+}
+.performer-tabs::-webkit-scrollbar { display: none; }
+
+.performer-tab {
+  flex: 0 0 auto;
+  min-width: 43px;
+  height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(255,255,255,.025);
+  font: 800 10px/1 "Barlow Condensed", sans-serif;
+  letter-spacing: .05em;
+  cursor: pointer;
+}
+.performer-tab:hover {
+  color: #fff;
+  border-color: rgba(245,183,40,.32);
+}
+.performer-tab.is-active {
+  color: #161100;
+  border-color: var(--gold);
+  background: linear-gradient(145deg, var(--gold-2), var(--gold));
+  box-shadow: 0 0 18px rgba(245,183,40,.12);
+}
+
+.performer-leaderboard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px;
+  color: #f7f9fc;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.performer-leaderboard-head small {
+  color: var(--muted);
+  font-size: 7px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.performer-leaderboard {
+  display: grid;
+  gap: 7px;
+}
+.performer-row {
+  grid-template-columns: 38px minmax(0,1fr) 70px;
+}
+.performer-rank {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 30px;
+  border-radius: 9px;
+  color: var(--gold-2);
+  background: rgba(245,183,40,.10);
+  font: 900 15px/1 "Barlow Condensed", sans-serif;
+}
+.performer-row.is-player-week .performer-rank {
+  color: #241800;
+  background: linear-gradient(145deg, var(--gold-2), var(--gold));
+}
+.performers-empty.compact {
+  min-height: 150px;
+}
+
+@media (max-width: 760px) {
+  .performer-tabs {
+    margin-right: -4px;
+    padding-bottom: 5px;
+  }
+  .performer-tab {
+    min-width: 48px;
+    height: 36px;
+    font-size: 11px;
+  }
+  .performer-leaderboard-head {
+    font-size: 10px;
+  }
+  .performer-row {
+    grid-template-columns: 38px minmax(0,1fr) 64px;
+    min-height: 54px;
+  }
+  .performer-copy strong { font-size: 13px; }
+  .performer-copy > span { font-size: 8px; }
+  .performer-points strong { font-size: 21px; }
+}
+
+
+/* ===== All-Time Leaders + Weekly Awards tab ===== */
+.overview-records-row{grid-template-columns:minmax(0,1.45fr) minmax(300px,.75fr)}
+.overview-records-row .all-time-performers-card{justify-content:flex-start}
+.season-record-chip{white-space:nowrap}
+.weekly-awards-shell{padding-top:24px}
+.weekly-awards-heading{align-items:flex-end}
+.weekly-awards-heading p{margin:6px 0 0;color:var(--muted);max-width:760px}
+.awards-week-selector{display:flex;align-items:center;gap:10px}
+.awards-week-selector>div{min-width:76px;text-align:center;text-transform:uppercase}
+.awards-week-selector span{display:block;font-size:10px;color:var(--muted);letter-spacing:.14em}
+.awards-week-selector strong{font-size:22px;color:var(--gold)}
+.weekly-awards-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,.8fr);gap:16px;margin-top:18px;align-items:start}
+.awards-performers-card,.awards-spotlight-card{min-height:420px}
+@media(max-width:1100px){.overview-records-row,.weekly-awards-grid{grid-template-columns:1fr}.weekly-awards-heading{align-items:flex-start;gap:16px}}
+@media(max-width:700px){.weekly-awards-shell{padding-top:14px}.weekly-awards-heading{display:flex;flex-direction:column}.awards-week-selector{width:100%;justify-content:space-between}.overview-records-row{grid-template-columns:1fr}}
+
+/* =========================================================
+   ALL-TIME TOP PERFORMANCES — FINAL LAYOUT FIX (Sep 2026)
+   Scoped to the Overview record card so Weekly Awards and
+   the rest of the site keep their existing layouts.
+   ========================================================= */
+.overview-records-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(360px, .95fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.overview-records-row .all-time-performers-card,
+.overview-records-row .spotlight-card {
+  min-width: 0;
+  height: 100%;
+}
+
+.overview-records-row .all-time-performers-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start !important;
+  padding: 20px;
+  overflow: hidden;
+}
+
+.all-time-performers-card .performers-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+}
+
+.all-time-performers-card .performers-subtitle {
+  margin-top: 2px;
+  max-width: 620px;
+}
+
+.all-time-performers-card .performer-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 0;
+  overflow: visible;
+}
+
+.all-time-performers-card .performer-tab {
+  flex: 0 0 auto;
+  min-width: 44px;
+}
+
+.all-time-performers-card .performer-leaderboard-head {
+  width: 100%;
+  margin: 0 0 7px;
+}
+
+.all-time-performers-card .performer-leaderboard {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+}
+
+.all-time-performers-card .performer-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 82px;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  padding: 8px 11px;
+  box-sizing: border-box;
+}
+
+.all-time-performers-card .performer-copy {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.all-time-performers-card .performer-copy strong,
+.all-time-performers-card .performer-copy > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.all-time-performers-card .performer-points {
+  min-width: 0;
+  text-align: right;
+  justify-self: end;
+}
+
+.all-time-performers-card .performer-points strong {
+  display: block;
+  line-height: .9;
+}
+
+.all-time-performers-card .performers-empty.compact {
+  min-height: 230px;
+  width: 100%;
+}
+
+@media (max-width: 1240px) {
+  .overview-records-row {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-records-row .spotlight-card {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 700px) {
+  .overview-records-row {
+    gap: 12px;
+  }
+
+  .overview-records-row .all-time-performers-card {
+    padding: 15px;
+  }
+
+  .all-time-performers-card .performers-heading {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .all-time-performers-card .performers-heading h2 {
+    font-size: 27px;
+  }
+
+  .all-time-performers-card .season-record-chip {
+    padding: 6px 8px;
+    font-size: 8px;
+  }
+
+  .all-time-performers-card .performer-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: none;
+    padding-bottom: 4px;
+  }
+
+  .all-time-performers-card .performer-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .all-time-performers-card .performer-row {
+    grid-template-columns: 38px minmax(0, 1fr) 66px;
+    gap: 8px;
+    min-height: 58px;
+    padding: 9px;
+  }
+
+  .all-time-performers-card .performer-rank {
+    width: 36px;
+    height: 34px;
+  }
+
+  .all-time-performers-card .performer-points strong {
+    font-size: 21px;
+  }
+}
+
+
+/* Grades historical week selector */
+.grades-week-control{display:flex;flex-direction:column;align-items:flex-end;gap:9px;min-width:0}
+.grades-week-tabs{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}
+.grades-week-tab{appearance:none;border:1px solid var(--line);background:rgba(255,255,255,.025);color:var(--muted);border-radius:999px;min-height:34px;padding:7px 13px;font:800 11px/1 inherit;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;transition:border-color .18s ease,background .18s ease,color .18s ease}
+.grades-week-tab:hover{border-color:rgba(255,199,44,.5);color:var(--text)}
+.grades-week-tab.is-active{border-color:rgba(255,199,44,.65);background:rgba(255,199,44,.12);color:var(--gold)}
+.grades-week-tab:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+@media(max-width:760px){.team-grades-heading{align-items:flex-start}.grades-week-control{width:100%;align-items:flex-start}.grades-week-tabs{width:100%;justify-content:flex-start;flex-wrap:nowrap;overflow-x:auto;padding-bottom:3px;scrollbar-width:none}.grades-week-tabs::-webkit-scrollbar{display:none}.grades-week-tab{flex:0 0 auto;min-height:40px;padding-inline:15px}}
