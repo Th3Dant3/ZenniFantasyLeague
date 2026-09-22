@@ -137,6 +137,8 @@ const state = {
   weekCache: new Map(),
   playerPerformanceCache: new Map(),
   weekRosterCache: new Map(),
+  weekPerformanceCache: new Map(),
+  awardsRequestToken: 0,
   teamGradeCache: new Map(),
   performerRequestToken: 0,
   topPerformerPosition: 'ALL',
@@ -145,6 +147,8 @@ const state = {
   awardsPerformerPosition: 'ALL',
   allTimePerformerPosition: 'ALL',
   allTimePerformanceCache: null,
+  allTimeRequestToken: 0,
+  allTimeMissingWeeks: [],
   teamGradeRequestToken: 0,
   activeView: 'overview',
   draft: null,
@@ -1044,6 +1048,7 @@ function getDefaultAwardsWeek_() {
 async function renderAllTimeTopStats_() {
   const container = document.getElementById('overviewTopStats');
   if (!container) return;
+  const requestToken = ++state.allTimeRequestToken;
 
   container.classList.add('skeleton-block');
   container.innerHTML = `
@@ -1060,13 +1065,24 @@ async function renderAllTimeTopStats_() {
       Number(state.league && state.league.currentWeek || 1)
     );
     const seasonPool = [];
+    const missingWeeks = [];
+    let loadedWeeks = 0;
 
     for (let week = 1; week <= maxWeek; week += 1) {
-      const snapshots = await getWeekRosterSnapshots_(week);
+      let snapshots;
+      try {
+        snapshots = await getWeekRosterSnapshots_(week);
+      } catch (error) {
+        if (requestToken !== state.allTimeRequestToken) return;
+        missingWeeks.push(week);
+        continue;
+      }
+      if (requestToken !== state.allTimeRequestToken) return;
+      loadedWeeks += 1;
       snapshots.forEach(snapshot => {
         const { team, roster } = snapshot;
         roster.forEach(player => {
-          if (isBattleBenchPlayer_(player)) return;
+          if (player.isStarter !== true) return;
           const points = getWeeklyPlayerPoints(player, week);
           const position = normalizeFantasyPosition(player.position || player.lineupSlot);
           const lineupSlot = normalizeTopPerformerSlot_(player.lineupSlot || player.slot);
@@ -1086,12 +1102,17 @@ async function renderAllTimeTopStats_() {
       });
     }
 
+    if (requestToken !== state.allTimeRequestToken) return;
+    state.allTimeMissingWeeks = missingWeeks;
+    if (!loadedWeeks) throw new Error('Weekly scoring data is temporarily unavailable. Please retry.');
     state.allTimePerformanceCache = seasonPool;
     container.classList.remove('skeleton-block');
     renderAllTimePerformerLeaderboard_(container, seasonPool);
   } catch (error) {
+    if (requestToken !== state.allTimeRequestToken) return;
     container.classList.remove('skeleton-block');
-    container.innerHTML = `<div class="performers-empty"><strong>Unable to load season records.</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
+    container.innerHTML = `<div class="performers-empty"><strong>Unable to load season records.</strong><span>${escapeHtml(error.message || String(error))}</span><button type="button" class="performer-tab" data-retry-season>Retry</button></div>`;
+    container.querySelector('[data-retry-season]').addEventListener('click', renderAllTimeTopStats_);
   }
 }
 
@@ -1106,7 +1127,9 @@ function renderAllTimePerformerLeaderboard_(container, playerPool) {
   const leaders = candidates.slice(0, 5);
   const tabLabel = value => value === 'DST' ? 'D/ST' : value;
 
+  const missingWeeks = state.allTimeMissingWeeks || [];
   container.innerHTML = `
+    ${missingWeeks.length ? `<div class="performers-empty compact" role="status"><strong>Showing available weekly records.</strong><span>Week ${missingWeeks.join(', ')} data is unavailable. Rankings may change when those weeks load.</span><button type="button" class="performer-tab" data-retry-season>Retry missing weeks</button></div>` : ''}
     <div class="performer-tabs" role="tablist" aria-label="All-time performer position">
       ${categories.map(category => `<button class="performer-tab ${category === active ? 'is-active' : ''}" type="button" data-alltime-position="${category}">${tabLabel(category)}</button>`).join('')}
     </div>
@@ -1123,6 +1146,9 @@ function renderAllTimePerformerLeaderboard_(container, playerPool) {
         </div>`).join('') : `<div class="performers-empty compact"><strong>No qualifying records yet.</strong><span>Records appear after starter points are posted.</span></div>`}
     </div>`;
 
+  const retry = container.querySelector('[data-retry-season]');
+  if (retry) retry.addEventListener('click', renderAllTimeTopStats_);
+
   container.querySelectorAll('[data-alltime-position]').forEach(button => {
     button.addEventListener('click', () => {
       state.allTimePerformerPosition = String(button.dataset.alltimePosition || 'ALL').toUpperCase();
@@ -1134,6 +1160,7 @@ function renderAllTimePerformerLeaderboard_(container, playerPool) {
 async function renderWeeklyAwards_(week) {
   const safeWeek = Math.max(1, Number(week || 1));
   state.awardsWeek = safeWeek;
+  const requestToken = ++state.awardsRequestToken;
   const label = document.getElementById('awardsWeekLabel');
   if (label) label.textContent = String(safeWeek);
 
@@ -1149,15 +1176,19 @@ async function renderWeeklyAwards_(week) {
     performerContainer.innerHTML = `<div class="performers-loading"><strong>Loading Week ${safeWeek} leaders...</strong><span>Top 5 starters by position</span></div>`;
   }
 
+  const pulse = document.getElementById('awardsLeaguePulse');
+  if (pulse) pulse.innerHTML = `<div class="performers-loading">Loading Week ${safeWeek} team performance...</div>`;
   try {
-    const [matchups, snapshots] = await Promise.all([getWeekMatchups(safeWeek), getWeekRosterSnapshots_(safeWeek)]);
-    renderLeaguePulse(matchups, safeWeek, 'awardsLeaguePulse');
+    const data = await getWeekPerformance_(safeWeek);
+    if (requestToken !== state.awardsRequestToken) return;
+    const snapshots = performanceSnapshots_(data);
+    renderLeaguePulse(data.matchups, safeWeek, 'awardsLeaguePulse');
 
     const pool = [];
     snapshots.forEach(snapshot => {
       const { team, roster } = snapshot;
       roster.forEach(player => {
-        if (isBattleBenchPlayer_(player)) return;
+        if (player.isStarter !== true) return;
         const points = getWeeklyPlayerPoints(player, safeWeek);
         const position = normalizeFantasyPosition(player.position || player.lineupSlot);
         const lineupSlot = normalizeTopPerformerSlot_(player.lineupSlot || player.slot);
@@ -1178,6 +1209,8 @@ async function renderWeeklyAwards_(week) {
       });
     }
   } catch (error) {
+    if (requestToken !== state.awardsRequestToken) return;
+    if (pulse) pulse.innerHTML = `<div class="performers-empty">Unable to load Week ${safeWeek} team performance. ${escapeHtml(error.message || String(error))}</div>`;
     if (performerContainer) {
       performerContainer.classList.remove('skeleton-block');
       performerContainer.innerHTML = `<div class="performers-empty"><strong>Unable to load Week ${safeWeek} awards.</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
@@ -1210,48 +1243,44 @@ function renderOverviewTopStats(week = state.selectedWeek) {
   loadTopPerformers(Number(week));
 }
 
+async function getWeekPerformance_(week) {
+  const key = Number(week);
+  if (!Number.isInteger(key) || key < 1) throw new Error('Invalid awards week');
+  const cached = state.weekPerformanceCache.get(key);
+  if (cached && (cached.pending || cached.expiresAt > Date.now())) return cached.promise;
+  const record = { pending: true, expiresAt: 0, promise: null };
+  record.promise = jsonp('performance', { week: key }).then(data => {
+    if (!data || data.ok === false || Number(data.scoringPeriodId) !== key ||
+        data.source !== 'weekly-boxscore-v10' || !Array.isArray(data.teams) ||
+        !Array.isArray(data.matchups)) {
+      throw new Error('Weekly data is unavailable or outdated. Deploy the v10 API and retry.');
+    }
+    if (!data.complete || !data.teams.length) {
+      throw new Error('ESPN has not returned all weekly starting lineups yet. Please retry shortly.');
+    }
+    record.pending = false;
+    // Expire even historical results so ESPN stat corrections can be picked up.
+    record.expiresAt = Date.now() + 30000;
+    return data;
+  }).catch(error => {
+    if (state.weekPerformanceCache.get(key) === record) state.weekPerformanceCache.delete(key);
+    throw error;
+  });
+  state.weekPerformanceCache.set(key, record);
+  return record.promise;
+}
+
+function performanceSnapshots_(data) {
+  const teamById = new Map((state.teams || []).map(team => [Number(team.id), team]));
+  return data.teams.map(result => ({
+    team: teamById.get(Number(result.teamId)) || { id: Number(result.teamId), name: 'Team ' + result.teamId },
+    data: result,
+    roster: Array.isArray(result.roster) ? result.roster : []
+  }));
+}
+
 async function getWeekRosterSnapshots_(week) {
-  const key = Number(week || 1);
-
-  if (state.weekRosterCache.has(key)) {
-    return state.weekRosterCache.get(key);
-  }
-
-  // IMPORTANT: Awards/record boards now use ONE batched API call per week.
-  // The old build launched 12 roster JSONP requests at once. Apps Script
-  // throttled/timed out most of them, which is why only one fantasy team
-  // appeared in Top Performances.
-  const request = jsonp('performance', { week: key })
-    .then(data => {
-      const teamResults = Array.isArray(data && data.teams) ? data.teams : [];
-      const teamById = new Map(
-        (state.teams || []).map(team => [Number(team.id), team])
-      );
-
-      const snapshots = teamResults.map(result => {
-        const teamId = Number(result && result.teamId || 0);
-        const team = teamById.get(teamId) || {
-          id: teamId,
-          name: `Team ${teamId}`
-        };
-
-        return {
-          team,
-          data: result || {},
-          roster: Array.isArray(result && result.roster) ? result.roster : []
-        };
-      });
-
-      state.weekRosterCache.set(key, snapshots);
-      return snapshots;
-    })
-    .catch(error => {
-      state.weekRosterCache.delete(key);
-      throw error;
-    });
-
-  state.weekRosterCache.set(key, request);
-  return request;
+  return performanceSnapshots_(await getWeekPerformance_(week));
 }
 
 async function loadTopPerformers(week) {
@@ -1271,7 +1300,7 @@ async function loadTopPerformers(week) {
         roster.forEach(player => {
           // Weekly Top Performers is a STARTER leaderboard. Bench and IR
           // performances do not qualify for Player of the Week.
-          if (isBattleBenchPlayer_(player)) return;
+          if (player.isStarter !== true) return;
 
           const points = getWeeklyPlayerPoints(player, week);
           const position = normalizeFantasyPosition(player.position || player.lineupSlot);
@@ -1409,6 +1438,7 @@ function renderTopPerformerLeaderboard_(container, week, playerPool) {
 
 function getWeeklyPlayerPoints(player, week) {
   if (!player || typeof player !== 'object') return null;
+  if (player.scoringPeriodId != null && Number(player.scoringPeriodId) !== Number(week)) return null;
 
   const directCandidates = [
     player.weekPoints,
