@@ -89,13 +89,16 @@ const CUSTOM_TEAM_ICONS = Object.freeze({
  * Add future rivalries, rematches, playoff revenge games, etc. here.
  */
 
-const LOADER_MINIMUM_MS = 1600;
+const LOADER_MINIMUM_MS = 1100;
 const LEAGUE_BROWSER_CACHE_KEY = 'ZENNI_FANTASY_LEAGUE_LAST_GOOD_V1';
 const LEAGUE_BROWSER_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const LEAGUE_RETRY_DELAYS_MS = [1200, 2800];
 
 const loaderState = {
   startedAt: Date.now(),
+  minimumMs: LOADER_MINIMUM_MS,
+  disabled: false,
+  note: null,
   progress: 0,
   target: 8,
   timer: null,
@@ -161,8 +164,2146 @@ const state = {
   battleCastSelectedKey: null,
   battleCastOpen: true,
   battleCastRequestSeq: 0,
-  scoreSyncTimer: null
+  scoreSyncTimer: null,
+
+  // Resilience layer
+  draftLoadState: 'idle',
+  pollingEnabled: false,
+  lastScoreRefreshAt: 0,
+  scoresStale: false,
+  leagueDegraded: false,
+  revalidateAttempts: 0,
+  visibilityBound: false,
+  seasonBoardKey: null,
+  seasonBoardTimer: null,
+
+  // Weekly recap
+  recap: null,
+  recapToken: 0,
+  recapForced: false,
+  recapAnimatedWeek: null,
+  recapCountdownTimer: null,
+  matchupsResolved: false,
+  kickoffMs: null,
+  kickoffFetchedAt: 0,
+
+  // Live motion + freshness
+  scoreMemory: new Map(),
+  castMemory: new Map(),
+  castPlayerMemory: new Map(),
+  toastQueue: [],
+  toastShowing: false,
+  motionQuietUntil: 0,
+  lastSyncAt: 0,
+  freshnessTimer: null,
+
+  // My team + sharing
+  myWeekRecap: null,
+  myWeekLoading: null,
+  myWeekTimer: null,
+  shareUrl: null,
+  shareFile: null
 };
+
+/* =========================================================
+   WEEKLY RECAP
+   Shown on the Overview from the moment a week is final until the next
+   week's first game starts. Everything is computed from numbers the site
+   already trusts (resolved matchups + weekly starters). No generated text.
+   ========================================================= */
+
+const RECAP_CACHE_PREFIX = 'ZENNI_FANTASY_RECAP_V2_';   // bumped: recap data gained bench + high/low
+const RECAP_LATEST_TTL_MS = 2 * 60 * 60 * 1000;
+const RECAP_OLD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const RECAP_KICKOFF_REFRESH_MS = 10 * 60 * 1000;
+
+function recapOrdinal_(n) {
+  const suffix = ['th', 'st', 'nd', 'rd'];
+  const v = Number(n) % 100;
+  return Number(n) + (suffix[(v - 20) % 10] || suffix[v] || suffix[0]);
+}
+
+function recapJoinNames_(names) {
+  const list = (names || []).filter(Boolean);
+  if (list.length <= 1) return list.join('');
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+function recapTeamName_(id) {
+  const team = state.teamMap.get(Number(id));
+  return team ? team.name : `Team ${id}`;
+}
+
+function recapRecordText_(team) {
+  if (!team) return '';
+  const ties = Number(team.ties || 0);
+  return `${Number(team.wins || 0)}-${Number(team.losses || 0)}${ties ? `-${ties}` : ''}`;
+}
+
+/**
+ * Which week should the recap describe, and should it be showing?
+ *   recap : the week is over and the next one has not started
+ *   live  : a newer week is already under way
+ *   none  : nothing has finished yet (Week 1)
+ */
+function getRecapContext_() {
+  if (!state.league) return null;
+
+  const current = Number(state.league.currentWeek || 1);
+  const statuses = (Array.isArray(state.currentMatchups) ? state.currentMatchups : [])
+    .map(match => String(match && match.status || '').toUpperCase());
+
+  const allFinal = statuses.length > 0 && statuses.every(status => status === 'FINAL');
+  const allScheduled = statuses.length > 0 && statuses.every(status => status === 'SCHEDULED');
+
+  // ESPN has not rolled to the next week yet, but every game is final.
+  if (allFinal) return { week: current, mode: 'recap', current };
+
+  if (current > 1) {
+    return { week: current - 1, mode: allScheduled ? 'recap' : 'live', current };
+  }
+
+  return { week: null, mode: 'none', current };
+}
+
+/**
+ * PURE: builds every recap fact from matchups + weekly rosters.
+ * No DOM, no state reads, safe to cache as JSON.
+ */
+function buildWeekRecap_(input) {
+  const week = Number(input.week);
+  const games = (Array.isArray(input.matchups) ? input.matchups : [])
+    .filter(match => match && match.homeTeamId && match.awayTeamId);
+  const snapshots = Array.isArray(input.snapshots) ? input.snapshots : [];
+
+  const rosterByTeam = new Map(
+    snapshots.map(snapshot => [Number(snapshot.team.id), Array.isArray(snapshot.roster) ? snapshot.roster : []])
+  );
+
+  const complete = games.length > 0 &&
+    games.every(match => String(match.status || '').toUpperCase() === 'FINAL');
+
+  const rows = [];
+  const pairs = [];
+
+  games.forEach(match => {
+    const homeScore = Number(match.homeScore || 0);
+    const awayScore = Number(match.awayScore || 0);
+    const margin = Math.abs(homeScore - awayScore);
+    const tie = homeScore === awayScore;
+    const homeWins = homeScore >= awayScore;
+
+    rows.push({
+      teamId: Number(match.homeTeamId), opponentId: Number(match.awayTeamId),
+      matchupId: Number(match.matchupId || 0), score: homeScore, opponentScore: awayScore,
+      result: tie ? 'T' : homeScore > awayScore ? 'W' : 'L', margin
+    });
+    rows.push({
+      teamId: Number(match.awayTeamId), opponentId: Number(match.homeTeamId),
+      matchupId: Number(match.matchupId || 0), score: awayScore, opponentScore: homeScore,
+      result: tie ? 'T' : awayScore > homeScore ? 'W' : 'L', margin
+    });
+
+    pairs.push({
+      matchupId: Number(match.matchupId || 0),
+      homeTeamId: Number(match.homeTeamId), awayTeamId: Number(match.awayTeamId),
+      homeScore, awayScore, tie, margin, combined: homeScore + awayScore,
+      winnerId: Number(homeWins ? match.homeTeamId : match.awayTeamId),
+      loserId: Number(homeWins ? match.awayTeamId : match.homeTeamId),
+      winnerScore: homeWins ? homeScore : awayScore,
+      loserScore: homeWins ? awayScore : homeScore
+    });
+  });
+
+  // League-wide scoring rank for the week (same tie-break as the Grades tab).
+  rows.slice()
+    .sort((a, b) => b.score - a.score || a.teamId - b.teamId)
+    .forEach((row, index) => { row.rank = index + 1; });
+
+  rows.forEach(row => {
+    row.efficiency = null;
+    row.projectionRatio = null;
+    row.optimal = null;
+    row.benchGap = 0;
+    row.couldHaveWon = false;
+
+    const roster = rosterByTeam.get(row.teamId);
+    if (!roster || !roster.length) return;
+
+    const optimal = calculateOptimalLineupScore_(roster);
+
+    if (optimal > 0) {
+      row.efficiency = Math.min(100, (row.score / optimal) * 100);
+      row.optimal = Math.round(optimal * 100) / 100;
+      row.benchGap = Math.max(0, Math.round((optimal - row.score) * 100) / 100);
+      row.couldHaveWon = row.result === 'L' && optimal > row.opponentScore;
+    }
+
+    const projection = rosterProjectionTotal_(normalizeBattleLineup_(roster).starters.filter(Boolean));
+    if (projection > 0) row.projectionRatio = row.score / projection;
+  });
+
+  const byRank = rows.slice().sort((a, b) => a.rank - b.rank);
+  const decided = pairs.filter(pair => !pair.tie);
+
+  const starters = pooledStartersForWeek_(snapshots, week)
+    .sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name)));
+
+  const topPlayer = starters[0];
+  const playerOfWeek = topPlayer && topPlayer.points > 0
+    ? {
+        name: topPlayer.name, position: topPlayer.position, nflTeam: topPlayer.nflTeam || '',
+        points: topPlayer.points, teamId: topPlayer.fantasyTeamId
+      }
+    : null;
+
+  const nailBiter = decided.length
+    ? decided.slice().sort((a, b) => a.margin - b.margin || a.matchupId - b.matchupId)[0]
+    : null;
+
+  const blowout = decided.length
+    ? decided.slice().sort((a, b) => b.margin - a.margin || a.matchupId - b.matchupId)[0]
+    : null;
+
+  const shootout = pairs.length
+    ? pairs.slice().sort((a, b) => b.combined - a.combined || a.matchupId - b.matchupId)[0]
+    : null;
+
+  // Best score among the losers. It only counts as "unlucky" when that score
+  // sat in the top half of the league; otherwise it was simply a bad week.
+  const bestLoser = rows
+    .filter(row => row.result === 'L')
+    .sort((a, b) => b.score - a.score || a.margin - b.margin)[0] || null;
+
+  const unluckiest = bestLoser && bestLoser.rank <= Math.ceil(rows.length / 2)
+    ? { ...bestLoser, perfect: bestLoser.efficiency != null && bestLoser.efficiency >= 99.9 }
+    : null;
+
+  // Who left the most points on their own bench? A loser whose bench would have
+  // WON them the game always ranks first; below 5 points it is not worth a story.
+  const benchLeader = rows
+    .filter(row => row.benchGap >= 5)
+    .sort((a, b) =>
+      Number(b.couldHaveWon) - Number(a.couldHaveWon) ||
+      b.benchGap - a.benchGap ||
+      a.teamId - b.teamId
+    )[0] || null;
+
+  const results = pairs
+    .slice()
+    .sort((a, b) => b.winnerScore - a.winnerScore || a.matchupId - b.matchupId);
+
+  const average = rows.length
+    ? rows.reduce((sum, row) => sum + row.score, 0) / rows.length
+    : 0;
+
+  return {
+    week,
+    complete,
+    hasRosters: snapshots.length > 0,
+    builtAt: Date.now(),
+    teamCount: rows.length,
+    teamOfWeek: byRank[0] || null,
+    playerOfWeek,
+    nailBiter,
+    blowout,
+    shootout,
+    unluckiest,
+    benchLeader,
+    average,
+    high: byRank[0] ? byRank[0].score : 0,
+    low: byRank.length ? byRank[byRank.length - 1].score : 0,
+    results,
+    rows
+  };
+}
+
+/* ---------- cache ---------- */
+
+function loadRecapCache_(week) {
+  try {
+    const raw = localStorage.getItem(RECAP_CACHE_PREFIX + Number(week));
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    const savedAt = Number(parsed.savedAt || 0);
+    const current = Number(state.league && state.league.currentWeek || 0);
+
+    // The latest finished week gets a short life so late ESPN stat
+    // corrections still reach the page.
+    const maxAge = Number(week) >= current - 1 ? RECAP_LATEST_TTL_MS : RECAP_OLD_TTL_MS;
+
+    if (!savedAt || !parsed.recap || (Date.now() - savedAt) > maxAge) return null;
+    return parsed.recap;
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveRecapCache_(recap) {
+  try {
+    localStorage.setItem(
+      RECAP_CACHE_PREFIX + Number(recap.week),
+      JSON.stringify({ savedAt: Date.now(), recap })
+    );
+  } catch (error) {
+    console.warn('Unable to save recap cache:', error);
+  }
+}
+
+/* ---------- show / hide ---------- */
+
+function syncRecapState_() {
+  const section = document.getElementById('weekRecap');
+  if (!section) return;
+
+  const hero = document.getElementById('overviewHero');
+  const openButton = document.getElementById('recapOpen');
+  const weekLabel = document.getElementById('thisWeekLabel');
+  const context = getRecapContext_();
+
+  const hasWeek = Boolean(context && context.week && context.week >= 1);
+  const auto = Boolean(hasWeek && context.mode === 'recap' && state.matchupsResolved);
+  const show = hasWeek && (auto || state.recapForced);
+
+  if (openButton) {
+    openButton.hidden = !(hasWeek && !show && state.matchupsResolved);
+    const label = openButton.querySelector('span');
+    if (label && hasWeek) label.textContent = `Week ${context.week} recap`;
+  }
+
+  if (!show) {
+    stopRecapCountdown_();
+    section.hidden = true;
+    if (hero) hero.hidden = false;
+    if (weekLabel) weekLabel.hidden = true;
+    return;
+  }
+
+  section.hidden = false;
+  if (hero) hero.hidden = true;
+
+  // Two clearly labelled halves: last week's recap, then this week's board.
+  if (weekLabel) {
+    weekLabel.hidden = !(context.current > context.week);
+    const text = weekLabel.querySelector('span');
+    if (text) text.textContent = `This week · Week ${context.current}`;
+  }
+
+  const rendered = state.recap && Number(state.recap.week) === Number(context.week) && section.childElementCount > 0 &&
+    section.dataset.forced === (state.recapForced ? '1' : '0');
+
+  if (rendered) {
+    updateRecapCountdown_();
+    return;
+  }
+
+  loadWeekRecap_(context.week);
+}
+
+/**
+ * Recap data only (no DOM). Shared by the recap panel and the My Team strip.
+ */
+async function getRecapData_(week, force = false) {
+  if (!force) {
+    const cached = loadRecapCache_(week);
+    if (cached) return cached;
+  }
+
+  const [matchups, snapshots] = await Promise.all([
+    getWeekMatchups(week),
+    getWeekRosterSnapshots_(week).catch(error => {
+      console.warn('Recap: weekly rosters unavailable, building a lighter recap.', error);
+      return null;
+    })
+  ]);
+
+  if (!Array.isArray(matchups) || !matchups.length) {
+    throw new Error(`No Week ${week} matchup data is available yet.`);
+  }
+
+  const recap = buildWeekRecap_({ week, matchups, snapshots: snapshots || [] });
+
+  // Only cache a complete picture, so a failed roster request is retried next time.
+  if (recap.complete && recap.hasRosters) saveRecapCache_(recap);
+
+  return recap;
+}
+
+async function loadWeekRecap_(week, force = false) {
+  const section = document.getElementById('weekRecap');
+  if (!section) return;
+
+  const token = ++state.recapToken;
+
+  if (!force) {
+    const cached = loadRecapCache_(week);
+
+    if (cached) {
+      state.recap = cached;
+      renderWeekRecap_();
+      loadRecapKickoff_();
+      return;
+    }
+  }
+
+  section.innerHTML = `
+    <div class="recap-loading" aria-hidden="true">
+      <div class="recap-skel recap-skel-hero"></div>
+      <div class="recap-skel-row"><i></i><i></i><i></i><i></i><i></i></div>
+    </div>`;
+
+  try {
+    const recap = await getRecapData_(week, true);
+    if (token !== state.recapToken) return;
+
+    state.recap = recap;
+    renderWeekRecap_();
+    loadRecapKickoff_();
+
+  } catch (error) {
+    if (token !== state.recapToken) return;
+
+    section.innerHTML = `
+      <div class="error-panel recap-error">
+        The Week ${escapeHtml(String(week))} recap could not be built. ${escapeHtml(error && error.message ? error.message : String(error))}
+        <button type="button" class="performer-tab" data-recap-retry>Retry</button>
+      </div>`;
+
+    const retry = section.querySelector('[data-recap-retry]');
+    if (retry) retry.addEventListener('click', () => loadWeekRecap_(week, true));
+  }
+}
+
+/* ---------- kickoff countdown ---------- */
+
+const KICKOFF_CACHE_KEY = 'ZENNI_FANTASY_KICKOFF_V1';
+
+function saveKickoffCache_(ms) {
+  try {
+    localStorage.setItem(KICKOFF_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), ms }));
+  } catch (error) { /* ignore */ }
+}
+
+function loadKickoffCache_() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(KICKOFF_CACHE_KEY) || 'null');
+    return parsed && Number.isFinite(Number(parsed.ms)) ? Number(parsed.ms) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Cached matchup statuses can be hours old. "Everything is scheduled" is the
+ * one state that silently stops being true (the moment a game kicks off), so
+ * it is only trusted while the next known kickoff is still in the future.
+ * FINAL and LIVE never move backwards, so they are always trusted.
+ */
+function cachedMatchupsTrusted_(cached) {
+  if (!cached || !Array.isArray(cached.matchups) || !cached.matchups.length) return false;
+  if (Number(cached.ageMs) < 10 * 60 * 1000) return true;
+
+  const allScheduled = cached.matchups.every(match => String(match && match.status || '').toUpperCase() === 'SCHEDULED');
+  if (!allScheduled) return true;
+
+  const kickoff = loadKickoffCache_();
+  return Boolean(kickoff && kickoff > Date.now());
+}
+
+async function loadRecapKickoff_() {
+  if (Date.now() - state.kickoffFetchedAt < RECAP_KICKOFF_REFRESH_MS) {
+    updateRecapCountdown_();
+    return;
+  }
+
+  // Throttle even on failure (an older API deployment has no schedule mode).
+  state.kickoffFetchedAt = Date.now();
+
+  try {
+    const data = await api_('schedule');
+    state.kickoffMs = data && Number.isFinite(Number(data.nextKickoffMs)) ? Number(data.nextKickoffMs) : null;
+    if (state.kickoffMs) saveKickoffCache_(state.kickoffMs);
+  } catch (error) {
+    state.kickoffMs = null;
+  }
+
+  updateRecapCountdown_();
+}
+
+function stopRecapCountdown_() {
+  if (state.recapCountdownTimer) {
+    window.clearInterval(state.recapCountdownTimer);
+    state.recapCountdownTimer = null;
+  }
+}
+
+function updateRecapCountdown_() {
+  const box = document.querySelector('[data-recap-countdown]');
+  if (!box) {
+    stopRecapCountdown_();
+    return;
+  }
+
+  const diff = state.kickoffMs ? state.kickoffMs - Date.now() : 0;
+
+  if (!(diff > 0)) {
+    box.hidden = true;
+    stopRecapCountdown_();
+    return;
+  }
+
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor((diff % 86400000) / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+
+  const set = (key, value) => {
+    const element = box.querySelector(`[data-cd="${key}"]`);
+    if (element) element.textContent = String(value).padStart(2, '0');
+  };
+
+  set('d', days);
+  set('h', hours);
+  set('m', minutes);
+  box.hidden = false;
+
+  if (!state.recapCountdownTimer) {
+    state.recapCountdownTimer = window.setInterval(updateRecapCountdown_, 30000);
+  }
+}
+
+/* ---------- motion ---------- */
+
+function recapPrefersReducedMotion_() {
+  return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+function animateRecapNumber_(element, target, duration = 900) {
+  if (!element) return;
+
+  element.textContent = number2(target);
+  if (recapPrefersReducedMotion_() || document.hidden) return;
+
+  const start = performance.now();
+
+  const step = now => {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    element.textContent = number2(target * eased);
+
+    if (t < 1) {
+      window.requestAnimationFrame(step);
+    } else {
+      element.textContent = number2(target);
+    }
+  };
+
+  window.requestAnimationFrame(step);
+}
+
+/* ---------- render ---------- */
+
+function recapLogo_(team, className = 'recap-logo') {
+  return `<img class="${className} ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>`;
+}
+
+function renderWeekRecap_() {
+  const section = document.getElementById('weekRecap');
+  const recap = state.recap;
+  if (!section || !recap || !recap.teamOfWeek) return;
+
+  const week = Number(recap.week);
+  const top = recap.teamOfWeek;
+  const topTeam = state.teamMap.get(Number(top.teamId));
+  const topOpponent = state.teamMap.get(Number(top.opponentId));
+  const animate = state.recapAnimatedWeek !== week && !recapPrefersReducedMotion_();
+  const nextWeek = Math.max(Number(state.league && state.league.currentWeek || 0), week + 1);
+
+  const closest = recap.nailBiter;
+  const biggest = recap.blowout;
+
+  const intro = [
+    `${recap.results.length} games in the books.`,
+    biggest ? `The biggest margin was ${number2(biggest.margin)} points` : '',
+    closest ? `and the closest was ${number2(closest.margin)}.` : '',
+    recap.complete ? `Final until Week ${nextWeek} kicks off.` : 'Some scores are still being confirmed.'
+  ].filter(Boolean).join(' ').replace(/ and the closest/, ', and the closest');
+
+  const pills = [`<span class="recap-pill is-good">#1 of ${recap.teamCount} scorers</span>`];
+  if (top.efficiency != null) pills.push(`<span class="recap-pill">${Math.round(top.efficiency)}% lineup efficiency</span>`);
+  if (top.projectionRatio != null) {
+    const delta = Math.round((top.projectionRatio - 1) * 100);
+    pills.push(`<span class="recap-pill">${delta >= 0 ? '+' : ''}${delta}% vs projection</span>`);
+  }
+
+  /* ---- story cards ---- */
+  const stories = [];
+
+  if (recap.playerOfWeek) {
+    const player = recap.playerOfWeek;
+    stories.push({
+      icon: '🌟', label: 'Player of the Week', title: escapeHtml(player.name),
+      body: `<b class="recap-big">${number2(player.points)} pts</b>${escapeHtml(player.position === 'DST' ? 'D/ST' : player.position)}${player.nflTeam ? ` · ${escapeHtml(player.nflTeam)}` : ''} · started for ${escapeHtml(recapTeamName_(player.teamId))}`
+    });
+  }
+
+  if (closest) {
+    stories.push({
+      icon: '⚡', label: 'Nail-biter',
+      title: `${escapeHtml(recapTeamName_(closest.winnerId))} edge ${escapeHtml(recapTeamName_(closest.loserId))} by ${number2(closest.margin)}`,
+      body: `${number2(closest.winnerScore)} to ${number2(closest.loserScore)}, the closest game of the week.`
+    });
+  }
+
+  if (recap.unluckiest) {
+    const unlucky = recap.unluckiest;
+    const lineup = unlucky.perfect
+      ? 'with a <b>perfect lineup</b>'
+      : unlucky.efficiency != null ? `with a <b>${Math.round(unlucky.efficiency)}% efficient</b> lineup` : '';
+
+    stories.push({
+      icon: '💔', label: 'Unluckiest loss', tone: 'bad', title: escapeHtml(recapTeamName_(unlucky.teamId)),
+      body: `${number2(unlucky.score)} was the <b>${recapOrdinal_(unlucky.rank)}-best score</b> of the week${lineup ? `, ${lineup}` : ''}. Still lost by ${number2(unlucky.margin)}.`
+    });
+  } else if (biggest) {
+    stories.push({
+      icon: '🔥', label: 'Biggest blowout', title: `${escapeHtml(recapTeamName_(biggest.winnerId))} by ${number2(biggest.margin)}`,
+      body: `${number2(biggest.winnerScore)} to ${number2(biggest.loserScore)} over ${escapeHtml(recapTeamName_(biggest.loserId))}.`
+    });
+  }
+
+  // Bench story beats the Shootout: Jeremy's vs Boom is already told by
+  // Team of the Week, the Unluckiest Loss and the results list.
+  if (recap.benchLeader) {
+    const bench = recap.benchLeader;
+
+    stories.push({
+      icon: '💺', label: 'Left on the bench', tone: bench.couldHaveWon ? 'bad' : '',
+      title: `${number2(bench.benchGap)} points`,
+      body: `<b>${escapeHtml(recapTeamName_(bench.teamId))}</b> scored ${number2(bench.score)}, but its best lineup was worth ${number2(bench.optimal)}${bench.couldHaveWon ? `, enough to beat ${escapeHtml(recapTeamName_(bench.opponentId))} (${number2(bench.opponentScore)})` : ''}.`
+    });
+  } else if (recap.shootout) {
+    const shoot = recap.shootout;
+
+    stories.push({
+      icon: '💥', label: 'Shootout', title: `${number2(shoot.combined)} combined`,
+      body: `${escapeHtml(recapTeamName_(shoot.homeTeamId))} ${number2(shoot.homeScore)} vs ${escapeHtml(recapTeamName_(shoot.awayTeamId))} ${number2(shoot.awayScore)}, the most points in one game.`
+    });
+  }
+
+  // The unbeaten/winless race lives in Race Snapshot, right below. Not repeated here.
+  stories.push({
+    icon: '📊', label: 'Week in numbers', title: `${number2(recap.average)} average`,
+    body: `Top score ${number2(top.score)}, lowest ${number2(recap.low != null ? recap.low : 0)}. ${recap.teamCount} teams, ${recap.results.length} games.`
+  });
+
+  const myStory = recapMyStory_(recap);
+  if (myStory) stories.unshift(myStory);
+  const storyCount = Math.min(stories.length, myStory ? 6 : 5);
+
+  const storyHtml = stories.slice(0, storyCount).map((story, index) => `
+    <article class="recap-card recap-story ${story.tone === 'bad' ? 'is-bad' : ''} ${story.tone === 'win' ? 'is-win' : ''} ${story.mine ? 'is-mine-story' : ''}" style="--i:${index + 3}" data-story-index="${index}">
+      <span class="recap-story-icon">${story.icon}</span>
+      <span class="recap-story-label">${story.label}</span>
+      <h3>${story.title}</h3>
+      <p>${story.body}</p>
+    </article>`).join('');
+
+  /* ---- all results ---- */
+  const resultsHtml = recap.results.map(pair => {
+    const winner = state.teamMap.get(Number(pair.winnerId));
+    const loser = state.teamMap.get(Number(pair.loserId));
+    return `
+      <div class="recap-result ${pair.tie ? 'is-tie' : ''}" data-team-ids="${pair.winnerId},${pair.loserId}">
+        <div class="recap-result-team">${recapLogo_(winner)}<span>${escapeHtml(winner ? winner.name : 'Team')}</span></div>
+        <strong class="recap-score ${pair.tie ? '' : 'is-win'}">${number2(pair.winnerScore)}</strong>
+        <em>${pair.tie ? 'TIE' : 'VS'}</em>
+        <strong class="recap-score is-lose">${number2(pair.loserScore)}</strong>
+        <div class="recap-result-team is-right"><span>${escapeHtml(loser ? loser.name : 'Team')}</span>${recapLogo_(loser)}</div>
+      </div>`;
+  }).join('');
+
+  const closeButton = state.recapForced
+    ? '<button type="button" class="recap-close" data-recap-close>← Back to overview</button>'
+    : '';
+
+  section.className = `week-recap ${animate ? 'is-entering' : ''}`;
+  section.dataset.forced = state.recapForced ? '1' : '0';
+  section.innerHTML = `
+    <div class="recap-hero">
+      <article class="recap-card recap-intro" style="--i:0">
+        ${closeButton}
+        <span class="recap-lock ${recap.complete ? '' : 'is-pending'}">${recap.complete ? '✓' : '●'} WEEK ${week} · ${recap.complete ? 'FINAL · LOCKED' : 'PROVISIONAL'}</span>
+        <h2>THE WEEK<br><span>THAT WAS</span></h2>
+        <p>${escapeHtml(intro)}</p>
+        <div class="recap-intro-footer">
+        <div class="recap-countdown" data-recap-countdown hidden>
+          <span class="section-kicker">Week ${nextWeek} kicks off in</span>
+          <div class="recap-cd">
+            <div><b data-cd="d">00</b><small>Days</small></div>
+            <div><b data-cd="h">00</b><small>Hrs</small></div>
+            <div><b data-cd="m">00</b><small>Min</small></div>
+          </div>
+        </div>
+        ${recapShareActionsHtml_()}
+        </div>
+      </article>
+
+      <article class="recap-card recap-totw" style="--i:1">
+        <div>
+          <span class="section-kicker">🏆 Team of the Week</span>
+          <h3>${escapeHtml(topTeam ? topTeam.name : 'Team')}</h3>
+          <p>${escapeHtml(topTeam ? ownerText(topTeam) : '')}${topOpponent ? ` · ${top.result === 'L' ? 'lost to' : top.result === 'T' ? 'tied' : 'beat'} ${escapeHtml(topOpponent.name)}${top.result === 'T' ? '' : ` by ${number2(top.margin)}`}` : ''}</p>
+        </div>
+        <div class="recap-totw-score" data-recap-score>${number2(top.score)}</div>
+        <div class="recap-pills">${pills.join('')}</div>
+      </article>
+    </div>
+
+    <div class="recap-progress" aria-hidden="true">${Array.from({ length: storyCount }, (_, index) => `<i class="${index === 0 ? 'is-on' : ''}"></i>`).join('')}</div>
+    <div class="recap-stories" data-recap-stories>${storyHtml}</div>
+    <p class="recap-swipe-hint">Tap a story or swipe for the next one</p>
+
+    <article class="recap-card recap-results" style="--i:8">
+      <div class="recap-results-head"><span class="section-kicker">All results</span><span>Week ${week} · ${recap.complete ? 'Final' : 'Provisional'}</span></div>
+      <div class="recap-results-grid">${resultsHtml}</div>
+    </article>`;
+
+  const close = section.querySelector('[data-recap-close]');
+  if (close) {
+    close.addEventListener('click', () => {
+      state.recapForced = false;
+      syncRecapState_();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
+
+  const battle = section.querySelector('[data-recap-battle]');
+  if (battle) battle.addEventListener('click', () => switchView('battle'));
+
+  if (animate) {
+    state.recapAnimatedWeek = week;
+    animateRecapNumber_(section.querySelector('[data-recap-score]'), top.score);
+  }
+
+  section.querySelectorAll('[data-share-kind]').forEach(button => {
+    button.addEventListener('click', () => openShareDialog_(button.dataset.shareKind));
+  });
+
+  const linkButton = section.querySelector('[data-share-link]');
+  if (linkButton) linkButton.addEventListener('click', () => copyPageLink_(linkButton));
+
+  bindRecapStories_(section);
+  applyMyTeamHighlights_();
+  updateRecapCountdown_();
+}
+
+/* =========================================================
+   LIVE MOTION
+   Rules: nothing animates on page load, nothing animates after a long
+   absence, and every effect says something happened:
+     score changed  -> number rolls up + "+x.xx" chip
+     lead flipped   -> card pulses + LEAD CHANGE pill
+     game finished  -> winner gold sweep, loser dims (and stays that way)
+     player scored  -> one toast at a time
+     win chance     -> bar eases to the new value
+   ========================================================= */
+
+const SCORE_MEMORY_MAX_AGE_MS = 10 * 60 * 1000;
+const MOTION_QUIET_AFTER_WARM_MS = 12000;
+const TOAST_VISIBLE_MS = 2600;
+const TOAST_MAX_INDIVIDUAL = 3;
+
+const MOTION_SURFACES = Object.freeze([
+  { host: '.overview-matchup-card[data-matchup-key]', home: '.overview-matchup-home', away: '.overview-matchup-away', score: '.matchup-score' },
+  { host: '.battle-card[data-matchup-key]', home: '.battle-mini-left', away: '.battle-mini-right', score: 'span' },
+  { host: '.motw-stage[data-matchup-key]', home: '.battle-fighter-left', away: '.battle-fighter-right', score: '.fighter-score' },
+  { host: '#featuredMatchup[data-matchup-key]', home: '.featured-team-left', away: '.featured-team-right', score: '.featured-score' },
+  { host: '.mystrip-card[data-matchup-key]', home: '.mystrip-team[data-side="home"]', away: '.mystrip-team[data-side="away"]', score: '.mystrip-score' }
+]);
+
+function motionReduced_() {
+  return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+function setScoreText_(element, value) {
+  const text = number2(value);
+
+  if (element.firstChild && element.firstChild.nodeType === 3) {
+    element.firstChild.nodeValue = text;
+  } else {
+    element.insertBefore(document.createTextNode(text), element.firstChild);
+  }
+}
+
+function rollNumber_(element, from, to, duration = 650) {
+  if (!element) return;
+
+  if (motionReduced_() || document.hidden) {
+    setScoreText_(element, to);
+    return;
+  }
+
+  const start = performance.now();
+  setScoreText_(element, from);
+
+  const step = now => {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    setScoreText_(element, from + (to - from) * eased);
+
+    if (t < 1) {
+      window.requestAnimationFrame(step);
+    } else {
+      setScoreText_(element, to);
+    }
+  };
+
+  window.requestAnimationFrame(step);
+}
+
+function timedClass_(element, className, ms) {
+  if (!element) return;
+  element.classList.add(className);
+  window.setTimeout(() => element.classList.remove(className), ms);
+}
+
+function scoreGain_(element, from, to) {
+  if (!element) return;
+
+  rollNumber_(element, from, to);
+  timedClass_(element, 'score-bump', 1500);
+
+  const chip = document.createElement('span');
+  chip.className = 'score-chip';
+  chip.textContent = `+${number2(to - from)}`;
+  element.appendChild(chip);
+  window.setTimeout(() => chip.remove(), 2400);
+}
+
+function collectMotionHosts_() {
+  const byKey = new Map();
+
+  MOTION_SURFACES.forEach(surface => {
+    document.querySelectorAll(surface.host).forEach(host => {
+      const key = host.dataset.matchupKey;
+      if (!key) return;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({ surface, host });
+    });
+  });
+
+  return byKey;
+}
+
+function applyMatchupMotion_(matchups, week) {
+  const list = Array.isArray(matchups) ? matchups : [];
+  if (!list.length) return;
+
+  const isCurrentWeek = Number(week) === Number(state.league && state.league.currentWeek);
+  const animateLive = isCurrentWeek && state.matchupsResolved;
+  const hostsByKey = collectMotionHosts_();
+  const now = Date.now();
+  const quiet = now < Number(state.motionQuietUntil || 0);
+
+  list.forEach(match => {
+    const key = battleMatchupKey_(match, week);
+    const targets = hostsByKey.get(key) || [];
+
+    const homeScore = Number(match.homeScore || 0);
+    const awayScore = Number(match.awayScore || 0);
+    const status = String(match.status || '').toUpperCase();
+    const isFinal = status === 'FINAL';
+    const decided = isFinal && homeScore !== awayScore;
+
+    // Finished games look finished everywhere, for every week.
+    targets.forEach(({ surface, host }) => {
+      const homeSide = host.querySelector(surface.home);
+      const awaySide = host.querySelector(surface.away);
+
+      [[homeSide, homeScore > awayScore], [awaySide, awayScore > homeScore]].forEach(([side, wins]) => {
+        if (!side) return;
+        side.classList.toggle('motion-win', decided && wins);
+        side.classList.toggle('motion-lose', decided && !wins);
+      });
+    });
+
+    if (!animateLive) return;
+
+    const previous = state.scoreMemory.get(key);
+    state.scoreMemory.set(key, { home: homeScore, away: awayScore, status, at: now });
+
+    // First sighting, a quiet window, or a stale baseline: remember, never animate.
+    if (!previous || quiet || (now - previous.at) > SCORE_MEMORY_MAX_AGE_MS) return;
+
+    const homeGain = homeScore - previous.home;
+    const awayGain = awayScore - previous.away;
+
+    const leaderBefore = Math.sign(previous.home - previous.away);
+    const leaderAfter = Math.sign(homeScore - awayScore);
+    const leadChanged = leaderBefore !== 0 && leaderAfter !== 0 && leaderBefore !== leaderAfter;
+    const justFinished = previous.status !== 'FINAL' && isFinal;
+
+    targets.forEach(({ surface, host }) => {
+      const homeEl = host.querySelector(`${surface.home} ${surface.score}`);
+      const awayEl = host.querySelector(`${surface.away} ${surface.score}`);
+
+      if (homeGain > 0.004) scoreGain_(homeEl, previous.home, homeScore);
+      if (awayGain > 0.004) scoreGain_(awayEl, previous.away, awayScore);
+
+      if (leadChanged && !isFinal) {
+        timedClass_(host, 'is-lead-change', 1900);
+
+        if (!host.querySelector('.lead-pill')) {
+          const pill = document.createElement('span');
+          pill.className = 'lead-pill';
+          pill.textContent = '⚡ Lead change';
+          host.appendChild(pill);
+          window.setTimeout(() => pill.remove(), 4000);
+        }
+      }
+
+      if (justFinished && decided) timedClass_(host, 'just-finalized', 2600);
+    });
+  });
+}
+
+/* ---------- FantasyCast: win chance + team score ---------- */
+
+function applyCastMotion_(container, match, week, snapshot) {
+  const key = battleMatchupKey_(match, week);
+  const now = Date.now();
+  const previous = state.castMemory.get(key);
+
+  state.castMemory.set(key, {
+    home: snapshot.homeScore, away: snapshot.awayScore, chanceHome: snapshot.chance.home, at: now
+  });
+
+  if (!previous || (now - previous.at) > SCORE_MEMORY_MAX_AGE_MS) return;
+
+  const homeEl = container.querySelector('.fantasycast-team-left .fantasycast-score');
+  const awayEl = container.querySelector('.fantasycast-team-right .fantasycast-score');
+
+  if (snapshot.homeScore - previous.home > 0.004) scoreGain_(homeEl, previous.home, snapshot.homeScore);
+  if (snapshot.awayScore - previous.away > 0.004) scoreGain_(awayEl, previous.away, snapshot.awayScore);
+
+  const shift = snapshot.chance.home - previous.chanceHome;
+  const bar = container.querySelector('.fantasycast-winbar > span');
+
+  if (bar && shift !== 0 && !motionReduced_()) {
+    // The panel is rebuilt on every refresh. Start the bar where it WAS and
+    // let the CSS transition carry it to where it IS.
+    bar.style.transition = 'none';
+    bar.style.width = `${previous.chanceHome}%`;
+    void bar.offsetWidth;
+    bar.style.transition = '';
+    window.requestAnimationFrame(() => { bar.style.width = `${snapshot.chance.home}%`; });
+  }
+
+  if (Math.abs(shift) >= 2) {
+    const homeName = snapshot.home ? snapshot.home.name : 'Home';
+    const note = document.createElement('div');
+    note.className = 'winbar-shift';
+    note.textContent = `⚡ Win chance moved: ${homeName} ${previous.chanceHome}% → ${snapshot.chance.home}%`;
+
+    const barWrap = container.querySelector('.fantasycast-winbar');
+    if (barWrap && barWrap.parentNode) barWrap.parentNode.insertBefore(note, barWrap.nextSibling);
+    window.setTimeout(() => note.remove(), 4400);
+  }
+}
+
+/* ---------- FantasyCast: scoring toasts (one at a time) ---------- */
+
+function detectCastPlays_(week, match, homeRoster, awayRoster) {
+  const now = Date.now();
+  const events = [];
+
+  [[match.homeTeamId, homeRoster], [match.awayTeamId, awayRoster]].forEach(([teamId, roster]) => {
+    normalizeBattleLineup_(roster).starters.filter(Boolean).forEach(player => {
+      const points = battlePlayerActualPoints_(player);
+      if (points == null || !player.playerId) return;
+
+      const key = `${Number(week)}:${Number(teamId)}:${player.playerId}`;
+      const previous = state.castPlayerMemory.get(key);
+      state.castPlayerMemory.set(key, { points, at: now });
+
+      if (!previous || (now - previous.at) > SCORE_MEMORY_MAX_AGE_MS) return;
+
+      const gain = points - previous.points;
+      if (gain >= 0.1) events.push({ name: player.name || 'A starter', gain, teamId: Number(teamId) });
+    });
+  });
+
+  if (!events.length) return;
+
+  // A pile of updates after a gap becomes ONE summary, not a slot machine.
+  if (events.length > TOAST_MAX_INDIVIDUAL) {
+    const total = events.reduce((sum, event) => sum + event.gain, 0);
+    enqueueLiveToast_({ title: `${events.length} scoring updates`, detail: `+${number2(total)} pts across both lineups` });
+    return;
+  }
+
+  events.sort((a, b) => b.gain - a.gain).forEach(event => {
+    const team = state.teamMap.get(event.teamId);
+    enqueueLiveToast_({
+      title: event.name,
+      detail: `+${number2(event.gain)} pts · ${team ? team.name : 'Team'}`
+    });
+  });
+}
+
+function ensureToastHost_() {
+  let host = document.getElementById('liveToasts');
+
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'liveToasts';
+    host.className = 'live-toasts';
+    host.setAttribute('aria-live', 'polite');
+    document.body.appendChild(host);
+  }
+
+  return host;
+}
+
+function enqueueLiveToast_(toast) {
+  if (state.toastQueue.length >= 6) return;
+  state.toastQueue.push(toast);
+  pumpLiveToasts_();
+}
+
+function pumpLiveToasts_() {
+  if (state.toastShowing || !state.toastQueue.length) return;
+
+  const toast = state.toastQueue.shift();
+  const host = ensureToastHost_();
+
+  state.toastShowing = true;
+
+  const element = document.createElement('div');
+  element.className = 'live-toast';
+  element.innerHTML = `
+    <span class="live-toast-icon">🏈</span>
+    <div><strong>${escapeHtml(toast.title)}</strong><small>${escapeHtml(toast.detail)}</small></div>`;
+  host.appendChild(element);
+
+  window.setTimeout(() => {
+    element.classList.add('is-leaving');
+
+    window.setTimeout(() => {
+      element.remove();
+      state.toastShowing = false;
+      pumpLiveToasts_();
+    }, motionReduced_() ? 0 : 280);
+  }, TOAST_VISIBLE_MS);
+}
+
+/* ---------- freshness: "updated 3m ago" + slow-ESPN banner ---------- */
+
+function formatAgo_(ms) {
+  const seconds = Math.max(0, Math.floor(Number(ms) / 1000));
+  if (seconds < 90) return 'just now';
+
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function renderApiFreshness_() {
+  const ageElement = document.getElementById('apiAge');
+  const banner = document.getElementById('staleBanner');
+  const age = state.lastSyncAt ? Date.now() - state.lastSyncAt : null;
+
+  if (ageElement) {
+    if (age != null && age >= 90000) {
+      ageElement.textContent = `updated ${formatAgo_(age)}`;
+      ageElement.hidden = false;
+    } else {
+      ageElement.hidden = true;
+    }
+  }
+
+  if (!banner) return;
+
+  // leagueDegraded is only set AFTER a refresh has failed, so a normal slow
+  // load never flashes this. Delayed scores wait 2 minutes before speaking up.
+  const show = state.leagueDegraded || (state.scoresStale && age != null && age >= 120000);
+
+  if (!show) {
+    banner.hidden = true;
+    return;
+  }
+
+  const text = banner.querySelector('[data-stale-text]');
+  const when = age != null ? formatAgo_(age) : 'earlier';
+
+  if (text) {
+    text.textContent = state.leagueDegraded
+      ? `ESPN is slow to respond. Showing saved scores from ${when}. Retrying…`
+      : `Live scores are delayed. Last update ${when}. Retrying…`;
+  }
+
+  banner.hidden = false;
+}
+
+/* =========================================================
+   MY TEAM
+   Follow one team. Saved on this device only (no login). The page then
+   opens on your matchup, marks your team everywhere, and tells you how
+   your week went.
+   ========================================================= */
+
+const MY_TEAM_KEY = 'ZENNI_FANTASY_MY_TEAM_V1';
+const MY_TEAM_PROMPT_KEY = 'ZENNI_FANTASY_MY_TEAM_PROMPT_V1';
+const MY_TEAM_PROMPT_SNOOZE_MS = 45 * 24 * 60 * 60 * 1000;
+
+function getMyTeamId_() {
+  try {
+    const id = Number(localStorage.getItem(MY_TEAM_KEY));
+    if (id && state.teamMap && state.teamMap.has(id)) return id;
+  } catch (error) { /* ignore */ }
+
+  return null;
+}
+
+function setMyTeamId_(teamId) {
+  try {
+    if (teamId) {
+      localStorage.setItem(MY_TEAM_KEY, String(Number(teamId)));
+    } else {
+      localStorage.removeItem(MY_TEAM_KEY);
+    }
+  } catch (error) {
+    console.warn('Unable to save My Team:', error);
+  }
+
+  refreshMyTeamUi_();
+}
+
+function myTeamPromptSnoozed_() {
+  try {
+    const at = Number(localStorage.getItem(MY_TEAM_PROMPT_KEY) || 0);
+    return Boolean(at && (Date.now() - at) < MY_TEAM_PROMPT_SNOOZE_MS);
+  } catch (error) {
+    return false;
+  }
+}
+
+function snoozeMyTeamPrompt_() {
+  try { localStorage.setItem(MY_TEAM_PROMPT_KEY, String(Date.now())); } catch (error) { /* ignore */ }
+  renderMyTeamStrip_();
+}
+
+function refreshMyTeamUi_() {
+  renderMyTeamStrip_();
+  applyMyTeamHighlights_();
+
+  const section = document.getElementById('weekRecap');
+  if (section && !section.hidden && state.recap) renderWeekRecap_();
+}
+
+function keyTeamIds_(key) {
+  const part = String(key || '').split(':')[1] || '';
+  return part.split('-').map(Number).filter(Boolean);
+}
+
+function myMatchupKeyIn_(matchups, week) {
+  const myId = getMyTeamId_();
+  if (!myId) return null;
+
+  const match = (matchups || []).find(item =>
+    Number(item.homeTeamId) === myId || Number(item.awayTeamId) === myId
+  );
+
+  return match ? battleMatchupKey_(match, week) : null;
+}
+
+/** This team's result for the most recent finished week, or null. */
+function getMyWeekSummary_() {
+  const myId = getMyTeamId_();
+  if (!myId) return null;
+
+  const context = getRecapContext_();
+  const recap = state.recap && Array.isArray(state.recap.rows) ? state.recap : state.myWeekRecap;
+
+  if (!recap || !Array.isArray(recap.rows)) return null;
+  if (context && context.week && Number(recap.week) !== Number(context.week) && !state.recapForced) return null;
+
+  const row = recap.rows.find(item => Number(item.teamId) === myId);
+  return row ? { ...row, week: recap.week, teamCount: recap.teamCount } : null;
+}
+
+async function ensureMyWeekData_() {
+  const context = getRecapContext_();
+  if (!context || !context.week || !getMyTeamId_()) return;
+  if (state.recap && Number(state.recap.week) === Number(context.week)) return;
+  if (state.myWeekRecap && Number(state.myWeekRecap.week) === Number(context.week)) return;
+  if (state.myWeekLoading === context.week) return;
+
+  state.myWeekLoading = context.week;
+
+  try {
+    state.myWeekRecap = await getRecapData_(context.week);
+  } catch (error) {
+    console.warn('My Team: last week data unavailable.', error);
+  } finally {
+    state.myWeekLoading = null;
+  }
+
+  renderMyTeamStrip_();
+}
+
+function myResultText_(summary) {
+  const verdict = summary.result === 'W' ? 'WIN' : summary.result === 'L' ? 'LOSS' : 'TIE';
+  if (summary.result === 'T') return verdict;
+  return `${verdict} ${summary.result === 'W' ? '+' : '−'}${number2(summary.margin)}`;
+}
+
+function renderMyTeamStrip_() {
+  const wrap = document.getElementById('myTeamStrip');
+  if (!wrap || !state.league) return;
+
+  const myId = getMyTeamId_();
+  const current = Number(state.league.currentWeek || 1);
+
+  // Not following yet: one polite question, easy to dismiss, never repeated.
+  if (!myId) {
+    if (myTeamPromptSnoozed_() || !state.teams.length) {
+      wrap.hidden = true;
+      wrap.innerHTML = '';
+      return;
+    }
+
+    wrap.hidden = false;
+    wrap.className = 'my-strip is-prompt';
+    wrap.innerHTML = `
+      <span class="my-strip-ask">★ <b>Which team is yours?</b> Pick once and this page opens on your matchup.</span>
+      <div class="my-strip-actions">
+        <button type="button" class="my-strip-primary" data-mine-pick>Pick my team</button>
+        <button type="button" class="my-strip-ghost" data-mine-snooze>Not now</button>
+      </div>`;
+
+    wrap.querySelector('[data-mine-pick]').addEventListener('click', openTeamPicker_);
+    wrap.querySelector('[data-mine-snooze]').addEventListener('click', snoozeMyTeamPrompt_);
+    return;
+  }
+
+  const team = state.teamMap.get(myId);
+  const matches = Array.isArray(state.currentMatchups) ? state.currentMatchups : [];
+  const match = matches.find(item => Number(item.homeTeamId) === myId || Number(item.awayTeamId) === myId);
+
+  wrap.hidden = false;
+  wrap.className = 'my-strip';
+
+  if (!match) {
+    wrap.innerHTML = `
+      <div class="mystrip-card">
+        <span class="mystrip-star">★</span>
+        <div class="mystrip-team is-me">${recapLogo_(team, 'mystrip-logo')}<div class="mystrip-name"><strong>${escapeHtml(team ? team.name : 'My team')}</strong><span>No Week ${current} matchup found</span></div></div>
+        <div class="mystrip-meta"><button type="button" class="my-strip-ghost" data-mine-pick>Change</button></div>
+      </div>`;
+    wrap.querySelector('[data-mine-pick]').addEventListener('click', openTeamPicker_);
+    return;
+  }
+
+  const iAmHome = Number(match.homeTeamId) === myId;
+  const opponent = state.teamMap.get(Number(iAmHome ? match.awayTeamId : match.homeTeamId));
+  const myScore = Number(iAmHome ? match.homeScore : match.awayScore || 0);
+  const theirScore = Number(iAmHome ? match.awayScore : match.homeScore || 0);
+  const status = String(match.status || 'SCHEDULED').toUpperCase();
+  const summary = getMyWeekSummary_();
+
+  const statusHtml = status === 'LIVE'
+    ? '<span class="mystrip-status is-live">● LIVE</span>'
+    : status === 'FINAL'
+      ? '<span class="mystrip-status">FINAL</span>'
+      : '<span class="mystrip-status">Not started</span>';
+
+  const lastWeekHtml = summary
+    ? `<span class="mystrip-last ${summary.result === 'W' ? 'is-win' : summary.result === 'L' ? 'is-loss' : ''}">Your Week ${summary.week}: ${escapeHtml(myResultText_(summary))} · #${summary.rank} of ${summary.teamCount}</span>`
+    : '';
+
+  wrap.innerHTML = `
+    <div class="mystrip-card" data-matchup-key="${escapeAttr(battleMatchupKey_(match, current))}">
+      <span class="mystrip-star">★</span>
+      <div class="mystrip-team is-me" data-side="${iAmHome ? 'home' : 'away'}">
+        ${recapLogo_(team, 'mystrip-logo')}
+        <div class="mystrip-name"><strong>${escapeHtml(team ? team.name : 'My team')}</strong><span>My team · Week ${current}</span></div>
+        <b class="mystrip-score">${number2(iAmHome ? match.homeScore : match.awayScore)}</b>
+      </div>
+      <span class="mystrip-vs">VS</span>
+      <div class="mystrip-team is-opp" data-side="${iAmHome ? 'away' : 'home'}">
+        <b class="mystrip-score">${number2(iAmHome ? match.awayScore : match.homeScore)}</b>
+        <div class="mystrip-name is-right"><strong>${escapeHtml(opponent ? opponent.name : 'Opponent')}</strong><span>${escapeHtml(recapRecordText_(opponent))}</span></div>
+        ${recapLogo_(opponent, 'mystrip-logo')}
+      </div>
+      <div class="mystrip-meta">${statusHtml}${lastWeekHtml}<button type="button" class="my-strip-ghost" data-mine-pick>Change</button></div>
+    </div>`;
+
+  wrap.querySelector('[data-mine-pick]').addEventListener('click', openTeamPicker_);
+
+  // Quietly fetch last week's result (cached) once the first screen is done.
+  if (!summary && !state.myWeekTimer) {
+    state.myWeekTimer = window.setTimeout(() => {
+      state.myWeekTimer = null;
+      ensureMyWeekData_();
+    }, 1200);
+  }
+}
+
+function applyMyTeamHighlights_() {
+  const myId = getMyTeamId_();
+  const toggle = (element, on) => element.classList.toggle('is-mine', Boolean(on));
+
+  document
+    .querySelectorAll('.overview-matchup-card[data-matchup-key], .battle-card[data-matchup-key], .motw-stage[data-matchup-key]')
+    .forEach(element => toggle(element, myId && keyTeamIds_(element.dataset.matchupKey).includes(myId)));
+
+  document.querySelectorAll('tr[data-team-id]').forEach(row => toggle(row, myId && Number(row.dataset.teamId) === myId));
+  document.querySelectorAll('.team-card[data-team-id]').forEach(card => toggle(card, myId && Number(card.dataset.teamId) === myId));
+  document.querySelectorAll('.recap-result[data-team-ids]').forEach(row => {
+    toggle(row, myId && row.dataset.teamIds.split(',').map(Number).includes(myId));
+  });
+}
+
+function openTeamPicker_() {
+  const dialog = document.getElementById('teamPicker');
+  if (!dialog || !state.teams.length) return;
+
+  const myId = getMyTeamId_();
+
+  dialog.innerHTML = `
+    <button class="modal-close" type="button" data-picker-close aria-label="Close">×</button>
+    <div class="picker-head">
+      <span class="section-kicker">★ My team</span>
+      <h2>Which team is yours?</h2>
+      <p>Saved on this device only. No login, nothing is sent anywhere.</p>
+    </div>
+    <div class="picker-grid">
+      ${state.teams.map(team => `
+        <button type="button" class="picker-team ${team.id === myId ? 'is-selected' : ''}" data-picker-team="${team.id}">
+          ${recapLogo_(team, 'picker-logo')}
+          <span><strong>${escapeHtml(team.name)}</strong><small>${escapeHtml(ownerText(team))}</small></span>
+        </button>`).join('')}
+    </div>
+    ${myId ? '<div class="picker-foot"><button type="button" class="picker-clear" data-picker-clear>Stop following</button></div>' : ''}`;
+
+  dialog.querySelector('[data-picker-close]').addEventListener('click', () => dialog.close());
+
+  dialog.querySelectorAll('[data-picker-team]').forEach(button => {
+    button.addEventListener('click', () => {
+      setMyTeamId_(Number(button.dataset.pickerTeam));
+      dialog.close();
+    });
+  });
+
+  const clear = dialog.querySelector('[data-picker-clear]');
+  if (clear) clear.addEventListener('click', () => { setMyTeamId_(null); dialog.close(); });
+
+  dialog.showModal();
+}
+
+function recapMyStory_(recap) {
+  const myId = getMyTeamId_();
+  if (!myId || !recap || !Array.isArray(recap.rows)) return null;
+
+  const row = recap.rows.find(item => Number(item.teamId) === myId);
+  if (!row) return null;
+
+  const team = state.teamMap.get(myId);
+  const opponent = state.teamMap.get(Number(row.opponentId));
+
+  const bits = [`${number2(row.score)} was ${recapOrdinal_(row.rank)} of ${recap.teamCount} scorers`];
+  if (row.efficiency != null) bits.push(`${Math.round(row.efficiency)}% lineup efficiency`);
+
+  if (row.projectionRatio != null) {
+    const delta = Math.round((row.projectionRatio - 1) * 100);
+    bits.push(`${delta >= 0 ? '+' : ''}${delta}% vs projection`);
+  }
+
+  return {
+    mine: true,
+    tone: row.result === 'L' ? 'bad' : 'win',
+    icon: '★',
+    label: 'Your week',
+    title: escapeHtml(myResultText_(row)),
+    body: `${escapeHtml(team ? team.name : 'Your team')} vs ${escapeHtml(opponent ? opponent.name : 'your opponent')}. ${escapeHtml(bits.join(' · '))}.`
+  };
+}
+
+/* ---------- phone: story progress + tap to advance ---------- */
+
+function bindRecapStories_(section) {
+  const row = section.querySelector('[data-recap-stories]');
+  const segments = Array.from(section.querySelectorAll('.recap-progress i'));
+  if (!row || !segments.length) return;
+
+  const cards = Array.from(row.children);
+
+  const update = () => {
+    const center = row.scrollLeft + row.clientWidth / 2;
+    let best = 0;
+    let bestDistance = Infinity;
+
+    cards.forEach((card, index) => {
+      const distance = Math.abs(card.offsetLeft + card.offsetWidth / 2 - center);
+      if (distance < bestDistance) { bestDistance = distance; best = index; }
+    });
+
+    segments.forEach((segment, index) => segment.classList.toggle('is-on', index <= best));
+    row.dataset.activeStory = String(best);
+  };
+
+  let frame = 0;
+  row.addEventListener('scroll', () => {
+    if (frame) return;
+    frame = window.requestAnimationFrame(() => { frame = 0; update(); });
+  }, { passive: true });
+
+  // On a phone the stories are a swipe row: a tap moves to the next one.
+  cards.forEach((card, index) => {
+    card.addEventListener('click', () => {
+      if (!window.matchMedia || !window.matchMedia('(max-width: 700px)').matches) return;
+
+      const next = cards[(index + 1) % cards.length];
+      row.scrollTo({
+        left: next.offsetLeft - (row.clientWidth - next.offsetWidth) / 2,
+        behavior: motionReduced_() ? 'auto' : 'smooth'
+      });
+    });
+  });
+
+  update();
+}
+
+/* =========================================================
+   SHARE IMAGE
+   Draws a 1080x1080 picture straight onto a canvas (no libraries, no
+   server) and hands it to the phone's share sheet, or downloads it.
+   ========================================================= */
+
+const SHARE_SIZE = 1080;
+const SHARE_HEAD = '"Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif';
+const SHARE_BODY = 'Inter, "Helvetica Neue", Arial, sans-serif';
+
+function recapShareActionsHtml_() {
+  const mine = getMyWeekSummary_();
+
+  return `
+    <div class="recap-share-actions" aria-label="Share">
+      <button type="button" class="recap-share-btn is-primary" data-share-kind="recap">📤 Share recap</button>
+      ${mine ? '<button type="button" class="recap-share-btn" data-share-kind="myweek">★ Share my week</button>' : ''}
+      <button type="button" class="recap-share-btn" data-share-link>🔗 Copy link</button>
+    </div>`;
+}
+
+function shareRoundRect_(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function shareFont_(ctx, size, weight, family) {
+  ctx.font = `${weight} ${size}px ${family}`;
+}
+
+function shareFit_(ctx, text, maxWidth, size, minSize, weight, family) {
+  let current = size;
+  shareFont_(ctx, current, weight, family);
+
+  while (ctx.measureText(text).width > maxWidth && current > minSize) {
+    current -= 2;
+    shareFont_(ctx, current, weight, family);
+  }
+
+  return current;
+}
+
+function shareWrap_(ctx, text, maxWidth, maxLines) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+
+  words.forEach(word => {
+    const trial = line ? `${line} ${word}` : word;
+    if (ctx.measureText(trial).width <= maxWidth || !line) {
+      line = trial;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  });
+
+  if (line) lines.push(line);
+
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines);
+    kept[maxLines - 1] = `${kept[maxLines - 1].replace(/\s+\S*$/, '')}…`;
+    return kept;
+  }
+
+  return lines;
+}
+
+function shareInitials_(name) {
+  return String(name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map(word => word[0]).join('').toUpperCase();
+}
+
+function loadShareImage_(source) {
+  return new Promise(resolve => {
+    if (!source) { resolve(null); return; }
+
+    const image = new Image();
+    const timer = window.setTimeout(() => resolve(null), 1800);
+
+    // 'anonymous' keeps the canvas exportable: a logo that cannot be read
+    // safely simply falls back to the monogram instead of breaking sharing.
+    image.crossOrigin = 'anonymous';
+    image.onload = () => { window.clearTimeout(timer); resolve(image); };
+    image.onerror = () => { window.clearTimeout(timer); resolve(null); };
+    image.src = source;
+  });
+}
+
+async function shareEnsureFonts_() {
+  try {
+    if (!document.fonts || !document.fonts.load) return;
+
+    await Promise.race([
+      Promise.all([document.fonts.load('800 80px "Barlow Condensed"'), document.fonts.load('700 30px Inter')]),
+      wait(1500)
+    ]);
+  } catch (error) { /* system fonts are fine */ }
+}
+
+function shareLogo_(ctx, image, team, x, y, size) {
+  ctx.save();
+  shareRoundRect_(ctx, x, y, size, size, size * 0.22);
+  ctx.clip();
+
+  if (image) {
+    ctx.drawImage(image, x, y, size, size);
+  } else {
+    ctx.fillStyle = '#f5b728';
+    ctx.fillRect(x, y, size, size);
+    ctx.fillStyle = '#07111f';
+    ctx.textAlign = 'center';
+    shareFont_(ctx, size * 0.42, 900, SHARE_HEAD);
+    ctx.fillText(shareInitials_(team ? team.name : ''), x + size / 2, y + size * 0.66);
+    ctx.textAlign = 'left';
+  }
+
+  ctx.restore();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(255,255,255,.22)';
+  shareRoundRect_(ctx, x, y, size, size, size * 0.22);
+  ctx.stroke();
+}
+
+function shareBackground_(ctx, footerLeft, footerRight) {
+  const gradient = ctx.createLinearGradient(0, 0, 0, SHARE_SIZE);
+  gradient.addColorStop(0, '#112641');
+  gradient.addColorStop(1, '#07111f');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, SHARE_SIZE, SHARE_SIZE);
+
+  const glow = ctx.createRadialGradient(930, 90, 10, 930, 90, 560);
+  glow.addColorStop(0, 'rgba(245,183,40,.30)');
+  glow.addColorStop(1, 'rgba(245,183,40,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, SHARE_SIZE, SHARE_SIZE);
+
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(245,183,40,.38)';
+  shareRoundRect_(ctx, 28, 28, SHARE_SIZE - 56, SHARE_SIZE - 56, 40);
+  ctx.stroke();
+
+  ctx.fillStyle = '#7f93ad';
+  shareFont_(ctx, 26, 700, SHARE_BODY);
+  ctx.textAlign = 'left';
+  ctx.fillText(footerLeft, 72, 1010);
+  ctx.textAlign = 'right';
+  ctx.fillText(footerRight, SHARE_SIZE - 72, 1010);
+  ctx.textAlign = 'left';
+}
+
+function shareKicker_(ctx, text) {
+  ctx.fillStyle = '#f5b728';
+  shareFont_(ctx, 28, 800, SHARE_BODY);
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '5px';
+  ctx.fillText(text, 72, 98);
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+}
+
+function shareHookRows_(recap) {
+  const name = id => recapTeamName_(id);
+  const rows = [];
+
+  if (recap.playerOfWeek) {
+    rows.push(['PLAYER OF THE WEEK', `${recap.playerOfWeek.name} · ${number2(recap.playerOfWeek.points)} pts`]);
+  }
+
+  if (recap.nailBiter) {
+    rows.push(['NAIL-BITER', `${name(recap.nailBiter.winnerId)} by ${number2(recap.nailBiter.margin)}`]);
+  }
+
+  if (recap.unluckiest) {
+    rows.push(['UNLUCKIEST LOSS', `${name(recap.unluckiest.teamId)} · ${number2(recap.unluckiest.score)} (${recapOrdinal_(recap.unluckiest.rank)} best)`]);
+  } else if (recap.blowout) {
+    rows.push(['BIGGEST BLOWOUT', `${name(recap.blowout.winnerId)} by ${number2(recap.blowout.margin)}`]);
+  }
+
+  return rows.slice(0, 3);
+}
+
+async function buildShareCanvas_(kind) {
+  const recap = state.recap && state.recap.teamOfWeek ? state.recap : state.myWeekRecap;
+  if (!recap || !recap.teamOfWeek) throw new Error('The recap is not ready yet.');
+
+  await shareEnsureFonts_();
+
+  const canvas = document.createElement('canvas');
+  canvas.width = SHARE_SIZE;
+  canvas.height = SHARE_SIZE;
+  const ctx = canvas.getContext('2d');
+
+  const week = Number(recap.week);
+
+  if (kind === 'myweek') {
+    const summary = getMyWeekSummary_();
+    const myId = getMyTeamId_();
+    if (!summary || !myId) throw new Error('Pick your team first.');
+
+    const team = state.teamMap.get(myId);
+    const opponent = state.teamMap.get(Number(summary.opponentId));
+    const logo = await loadShareImage_(team ? getTeamIcon(team) : '');
+    const win = summary.result === 'W';
+    const loss = summary.result === 'L';
+
+    shareBackground_(ctx, 'Zenni League 2026', recap.complete ? 'FINAL · LOCKED' : 'PROVISIONAL');
+    shareKicker_(ctx, `ZENNI LEAGUE · MY WEEK ${week}`);
+    shareLogo_(ctx, logo, team, 72, 140, 170);
+
+    ctx.fillStyle = '#ffffff';
+    const size = shareFit_(ctx, team ? team.name : 'My team', 700, 92, 54, 800, SHARE_HEAD);
+    const lines = shareWrap_(ctx, team ? team.name : 'My team', 700, 2);
+    const block = size * 0.98 * lines.length;
+    const firstBaseline = 140 + (170 - block) / 2 + size * 0.82;
+    lines.forEach((line, index) => ctx.fillText(line, 272, firstBaseline + index * size * 0.98));
+
+    // verdict chip
+    ctx.fillStyle = win ? '#4bd384' : loss ? '#ff5a6f' : '#f5b728';
+    shareRoundRect_(ctx, 72, 360, 560, 120, 28);
+    ctx.fill();
+    ctx.fillStyle = '#07111f';
+    shareFont_(ctx, 84, 800, SHARE_HEAD);
+    ctx.fillText(myResultText_(summary), 108, 448);
+
+    ctx.fillStyle = '#ffd978';
+    shareFont_(ctx, 250, 800, SHARE_HEAD);
+    ctx.fillText(number2(summary.score), 66, 720);
+
+    ctx.fillStyle = '#c9d6e6';
+    shareFont_(ctx, 38, 600, SHARE_BODY);
+    ctx.fillText(`vs ${opponent ? opponent.name : 'opponent'}  ${number2(summary.opponentScore)}`, 72, 782);
+
+    const stats = [['WEEK RANK', `#${summary.rank} of ${summary.teamCount}`]];
+    if (summary.efficiency != null) stats.push(['LINEUP EFFICIENCY', `${Math.round(summary.efficiency)}%`]);
+    if (summary.projectionRatio != null) {
+      const delta = Math.round((summary.projectionRatio - 1) * 100);
+      stats.push(['VS PROJECTION', `${delta >= 0 ? '+' : '−'}${Math.abs(delta)}%`]);
+    }
+
+    const boxWidth = (SHARE_SIZE - 144 - 24 * (stats.length - 1)) / stats.length;
+    stats.forEach(([label, value], index) => {
+      const x = 72 + index * (boxWidth + 24);
+      ctx.fillStyle = 'rgba(255,255,255,.07)';
+      shareRoundRect_(ctx, x, 830, boxWidth, 130, 22);
+      ctx.fill();
+      ctx.fillStyle = '#93a6bd';
+      shareFont_(ctx, 20, 800, SHARE_BODY);
+      ctx.fillText(label, x + 24, 872);
+      ctx.fillStyle = '#ffffff';
+      shareFont_(ctx, 62, 800, SHARE_HEAD);
+      ctx.fillText(value, x + 24, 936);
+    });
+
+    return canvas;
+  }
+
+  // ---- league recap card ----
+  const top = recap.teamOfWeek;
+  const topTeam = state.teamMap.get(Number(top.teamId));
+  const logo = await loadShareImage_(topTeam ? getTeamIcon(topTeam) : '');
+
+  shareBackground_(ctx, 'Zenni League 2026', recap.complete ? 'FINAL · LOCKED' : 'PROVISIONAL');
+  shareKicker_(ctx, `ZENNI LEAGUE · WEEK ${week} RECAP`);
+  shareLogo_(ctx, logo, topTeam, 72, 140, 180);
+
+  ctx.fillStyle = '#f5b728';
+  shareFont_(ctx, 26, 800, SHARE_BODY);
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '4px';
+  ctx.fillText('TEAM OF THE WEEK', 282, 182);
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+
+  ctx.fillStyle = '#ffffff';
+  const nameSize = shareFit_(ctx, topTeam ? topTeam.name : 'Team', 700, 92, 54, 800, SHARE_HEAD);
+  shareWrap_(ctx, topTeam ? topTeam.name : 'Team', 700, 2).forEach((line, index) => {
+    ctx.fillText(line, 282, 262 + index * nameSize * 0.98);
+  });
+
+  ctx.fillStyle = '#ffd978';
+  shareFont_(ctx, 250, 800, SHARE_HEAD);
+  ctx.fillText(number2(top.score), 66, 560);
+
+  const facts = [];
+  if (top.result !== 'T') facts.push(`${top.result === 'W' ? 'Won' : 'Lost'} by ${number2(top.margin)}`);
+  facts.push(`#1 of ${recap.teamCount} scorers`);
+  if (top.efficiency != null) facts.push(`${Math.round(top.efficiency)}% lineup efficiency`);
+
+  ctx.fillStyle = '#c9d6e6';
+  shareFit_(ctx, facts.join('  ·  '), 936, 32, 22, 600, SHARE_BODY);
+  ctx.fillText(facts.join('  ·  '), 72, 616);
+
+  ctx.fillStyle = 'rgba(255,255,255,.12)';
+  ctx.fillRect(72, 658, SHARE_SIZE - 144, 2);
+
+  shareHookRows_(recap).forEach(([label, text], index) => {
+    const y = 712 + index * 98;
+    ctx.fillStyle = '#f5b728';
+    shareFont_(ctx, 22, 800, SHARE_BODY);
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '3px';
+    ctx.fillText(label, 72, y);
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+
+    ctx.fillStyle = '#ffffff';
+    shareFit_(ctx, text, 936, 44, 26, 700, SHARE_BODY);
+    ctx.fillText(text, 72, y + 46);
+  });
+
+  return canvas;
+}
+
+function releaseShareUrl_() {
+  if (state.shareUrl) {
+    URL.revokeObjectURL(state.shareUrl);
+    state.shareUrl = null;
+  }
+  state.shareFile = null;
+}
+
+function canNativeShare_(file) {
+  try {
+    return Boolean(navigator.share && navigator.canShare && navigator.canShare({ files: [file] }));
+  } catch (error) {
+    return false;
+  }
+}
+
+function shareStatus_(dialog, text) {
+  const status = dialog.querySelector('[data-share-status]');
+  if (!status) return;
+  status.textContent = text;
+  window.clearTimeout(shareStatus_.timer);
+  if (text) shareStatus_.timer = window.setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+async function copyPageLink_(button) {
+  const url = `${window.location.origin}${window.location.pathname}`;
+
+  try {
+    await navigator.clipboard.writeText(url);
+    if (button) {
+      const original = button.textContent;
+      button.textContent = '✓ Link copied';
+      window.setTimeout(() => { button.textContent = original; }, 1800);
+    }
+  } catch (error) {
+    window.prompt('Copy this link:', url);
+  }
+}
+
+async function openShareDialog_(kind) {
+  const dialog = document.getElementById('shareModal');
+  if (!dialog) return;
+
+  releaseShareUrl_();
+
+  const preview = dialog.querySelector('[data-share-preview]');
+  const title = dialog.querySelector('[data-share-title]');
+  const actions = dialog.querySelector('[data-share-actions]');
+
+  title.textContent = kind === 'myweek' ? 'Share my week' : 'Share the recap';
+  preview.removeAttribute('src');
+  preview.hidden = true;
+  actions.hidden = true;
+  dialog.querySelector('[data-share-loading]').hidden = false;
+  shareStatus_(dialog, '');
+
+  if (!dialog.open) dialog.showModal();
+
+  try {
+    const canvas = await buildShareCanvas_(kind);
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob(result => (result ? resolve(result) : reject(new Error('The image could not be created.'))), 'image/png');
+    });
+
+    const week = state.recap && state.recap.week ? state.recap.week : (state.myWeekRecap ? state.myWeekRecap.week : '');
+    const filename = `zenni-week-${week}-${kind === 'myweek' ? 'my-week' : 'recap'}.png`;
+    const file = new File([blob], filename, { type: 'image/png' });
+
+    state.shareFile = file;
+    state.shareUrl = URL.createObjectURL(blob);
+
+    preview.src = state.shareUrl;
+    preview.hidden = false;
+    dialog.querySelector('[data-share-loading]').hidden = true;
+    actions.hidden = false;
+
+    const nativeButton = dialog.querySelector('[data-share-native]');
+    const downloadLink = dialog.querySelector('[data-share-download]');
+    const copyImage = dialog.querySelector('[data-share-copy-image]');
+    const copyLink = dialog.querySelector('[data-share-copy-link]');
+
+    nativeButton.hidden = !canNativeShare_(file);
+    nativeButton.onclick = async () => {
+      try {
+        await navigator.share({ files: [file], title: `Zenni League · Week ${week}` });
+      } catch (error) {
+        if (error && error.name !== 'AbortError') shareStatus_(dialog, 'Sharing was not possible here. Use Download instead.');
+      }
+    };
+
+    downloadLink.href = state.shareUrl;
+    downloadLink.download = filename;
+
+    copyImage.hidden = !(navigator.clipboard && window.ClipboardItem);
+    copyImage.onclick = async () => {
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        shareStatus_(dialog, '✓ Image copied. Paste it into your chat.');
+      } catch (error) {
+        shareStatus_(dialog, 'Copying images is not allowed here. Use Download instead.');
+      }
+    };
+
+    copyLink.onclick = async () => {
+      await copyPageLink_(null);
+      shareStatus_(dialog, '✓ Link copied');
+    };
+
+  } catch (error) {
+    dialog.querySelector('[data-share-loading]').hidden = false;
+    dialog.querySelector('[data-share-loading]').textContent = error && error.message ? error.message : 'The image could not be created.';
+  }
+}
+
+/* =========================================================
+   ZENNI RESILIENCE LAYER
+   Startup, retries, browser caches, adaptive polling.
+   ========================================================= */
+
+// Per-mode timeouts. Cold Apps Script starts regularly run past 15 seconds,
+// so a short timeout turned a slow-but-successful first call into a failure.
+const API_TIMEOUT_MS = Object.freeze({
+  league: 20000,
+  matchups: 20000,
+  performance: 25000,
+  draftboard: 30000,
+  roster: 20000,
+  _default: 20000
+});
+
+// Retry schedule per mode (delay before each retry).
+const API_RETRY_DELAYS_MS = Object.freeze({
+  league: [1200, 2800],
+  matchups: [1200, 2800],
+  performance: [2000],
+  draftboard: [3000],
+  roster: [1500],
+  _default: []
+});
+
+const MATCHUPS_BROWSER_CACHE_PREFIX = 'ZENNI_FANTASY_MATCHUPS_V1_';
+const MATCHUPS_BROWSER_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const DRAFT_BROWSER_CACHE_KEY = 'ZENNI_FANTASY_DRAFT_V1';
+const DRAFT_BROWSER_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const SEASON_POOL_CACHE_KEY = 'ZENNI_FANTASY_SEASON_POOL_V1';
+const LOADER_SEEN_KEY = 'ZENNI_LOADER_SEEN_V1';
+
+const MATCHUPS_GRACE_MS = 3000;
+const SEASON_BOARD_DELAY_MS = 800;
+const SEASON_BOARD_CONCURRENCY = 2;
+
+const POLL_LIVE_MS = 60 * 1000;
+const POLL_GAMEDAY_MS = 2 * 60 * 1000;
+const POLL_IDLE_MS = 5 * 60 * 1000;
+const POLL_STALE_RETRY_MS = 20 * 1000;
+const REVALIDATE_RETRY_DELAYS_MS = [15000, 45000, 120000];
+
+const apiInflight_ = new Map();
+
+function setLoaderNote_(text) {
+  loaderState.note = text;
+  const message = document.getElementById('loaderMessage');
+  if (message) message.textContent = text;
+}
+
+function safeSessionGet_(key) {
+  try { return window.sessionStorage.getItem(key); } catch (_) { return null; }
+}
+
+function safeSessionSet_(key, value) {
+  try { window.sessionStorage.setItem(key, value); } catch (_) { /* ignore */ }
+}
+
+function apiRequestKey_(mode, params) {
+  const clean = {};
+  Object.keys(params || {}).sort().forEach(key => {
+    if (key !== '_ts') clean[key] = params[key];
+  });
+  return `${mode}?${JSON.stringify(clean)}`;
+}
+
+/**
+ * Every network call goes through here.
+ *  - per-mode timeout (see jsonp)
+ *  - per-mode retries; a server {ok:false} is retried like a network failure
+ *  - identical requests already in flight are shared, not duplicated
+ */
+function api_(mode, params = {}) {
+  const key = apiRequestKey_(mode, params);
+  if (apiInflight_.has(key)) return apiInflight_.get(key);
+
+  const delays = API_RETRY_DELAYS_MS[mode] || API_RETRY_DELAYS_MS._default;
+  const promise = jsonpWithRetry_(mode, params, delays)
+    .finally(() => apiInflight_.delete(key));
+
+  apiInflight_.set(key, promise);
+  return promise;
+}
+
+/* ---------- matchups browser cache ---------- */
+
+function saveMatchupsBrowserCache_(week, matchups) {
+  try {
+    localStorage.setItem(
+      MATCHUPS_BROWSER_CACHE_PREFIX + Number(week),
+      JSON.stringify({ savedAt: Date.now(), matchups })
+    );
+  } catch (error) {
+    console.warn('Unable to save matchups browser cache:', error);
+  }
+}
+
+function loadMatchupsBrowserCache_(week) {
+  try {
+    const raw = localStorage.getItem(MATCHUPS_BROWSER_CACHE_PREFIX + Number(week));
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    const savedAt = Number(parsed.savedAt || 0);
+    const ageMs = Math.max(0, Date.now() - savedAt);
+
+    if (!savedAt || !Array.isArray(parsed.matchups) || ageMs > MATCHUPS_BROWSER_CACHE_MAX_AGE_MS) {
+      return null;
+    }
+
+    return { matchups: parsed.matchups, savedAt, ageMs };
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Adopt a resolved-matchups payload ONLY when it belongs to the week the
+ * league currently reports. Returns true when state was updated.
+ */
+function applyMatchupsPayload_(payload) {
+  if (!payload || payload.ok === false || !Array.isArray(payload.matchups) || !payload.matchups.length) {
+    return false;
+  }
+
+  const week = Number(payload.week || 0);
+  const current = Number(state.league && state.league.currentWeek || 0);
+  if (!week || week !== current) return false;
+
+  state.currentMatchups = payload.matchups;
+  state.weekCache.set(week, payload.matchups);
+  state.lastScoreRefreshAt = Date.now();
+  state.lastSyncAt = Date.now();
+  state.scoresStale = false;
+  state.matchupsResolved = true;
+  saveMatchupsBrowserCache_(week, payload.matchups);
+  return true;
+}
+
+/* ---------- draft browser cache (only a COMPLETE draft is cached) ---------- */
+
+function saveDraftBrowserCache_(data) {
+  try {
+    if (!data || !data.ok || !data.draft || data.draft.status !== 'COMPLETE') return;
+    localStorage.setItem(DRAFT_BROWSER_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), data }));
+  } catch (error) {
+    console.warn('Unable to save draft browser cache:', error);
+  }
+}
+
+function loadDraftBrowserCache_() {
+  try {
+    const raw = localStorage.getItem(DRAFT_BROWSER_CACHE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    const savedAt = Number(parsed.savedAt || 0);
+    if (!savedAt || !parsed.data || (Date.now() - savedAt) > DRAFT_BROWSER_CACHE_MAX_AGE_MS) return null;
+
+    return parsed.data;
+  } catch (error) {
+    return null;
+  }
+}
+
+/* ---------- season record board cache (finished weeks never change) ---------- */
+
+function loadSeasonPoolCache_() {
+  try {
+    const raw = localStorage.getItem(SEASON_POOL_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveSeasonPoolCache_(cache) {
+  try {
+    localStorage.setItem(SEASON_POOL_CACHE_KEY, JSON.stringify(cache));
+  } catch (error) {
+    console.warn('Unable to save season pool cache:', error);
+  }
+}
+
+// A week is cacheable only once it is behind the current week. The most
+// recent finished week gets a short life so late ESPN stat corrections show up.
+function seasonPoolFresh_(entry, week, currentWeek) {
+  if (!entry || !Array.isArray(entry.pool)) return false;
+  if (Number(week) >= Number(currentWeek)) return false;
+
+  const age = Date.now() - Number(entry.savedAt || 0);
+  const maxAge = Number(week) === Number(currentWeek) - 1
+    ? 6 * 60 * 60 * 1000
+    : 7 * 24 * 60 * 60 * 1000;
+
+  return age >= 0 && age < maxAge;
+}
+
+/* ---------- adaptive, visibility-aware score polling ---------- */
+
+function isLikelyGameDay_(date = new Date()) {
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    timeZone: 'America/New_York'
+  }).format(date);
+
+  return ['Thu', 'Sat', 'Sun', 'Mon'].includes(weekday);
+}
+
+function currentPollDelayMs_() {
+  if (state.scoresStale) return POLL_STALE_RETRY_MS;
+
+  const statuses = (Array.isArray(state.currentMatchups) ? state.currentMatchups : [])
+    .map(match => String(match && match.status || '').toUpperCase());
+
+  if (statuses.some(status => status === 'LIVE')) return POLL_LIVE_MS;
+  if (statuses.length && statuses.every(status => status === 'FINAL')) return POLL_IDLE_MS;
+
+  return isLikelyGameDay_() ? POLL_GAMEDAY_MS : POLL_IDLE_MS;
+}
+
+function startCurrentWeekScorePolling_() {
+  stopCurrentWeekScorePolling_();
+  state.pollingEnabled = true;
+
+  if (!state.visibilityBound) {
+    document.addEventListener('visibilitychange', onVisibilityChange_);
+    state.visibilityBound = true;
+  }
+
+  scheduleNextScorePoll_();
+}
+
+function stopCurrentWeekScorePolling_() {
+  state.pollingEnabled = false;
+
+  if (state.scoreSyncTimer) {
+    window.clearTimeout(state.scoreSyncTimer);
+    state.scoreSyncTimer = null;
+  }
+}
+
+function scheduleNextScorePoll_() {
+  if (state.scoreSyncTimer) {
+    window.clearTimeout(state.scoreSyncTimer);
+    state.scoreSyncTimer = null;
+  }
+
+  // A hidden tab never polls. It catches up when it becomes visible again.
+  if (!state.pollingEnabled || document.hidden) return;
+
+  state.scoreSyncTimer = window.setTimeout(runScorePoll_, currentPollDelayMs_());
+}
+
+async function runScorePoll_() {
+  state.scoreSyncTimer = null;
+  if (!state.pollingEnabled || document.hidden) return;
+
+  await refreshCurrentWeekMatchups_(true);
+
+  if (state.activeView === 'battle' && state.battleCastOpen) {
+    loadBattleFantasyCast_(true);
+  }
+
+  scheduleNextScorePoll_();
+}
+
+function onVisibilityChange_() {
+  if (document.hidden) {
+    if (state.scoreSyncTimer) {
+      window.clearTimeout(state.scoreSyncTimer);
+      state.scoreSyncTimer = null;
+    }
+    return;
+  }
+
+  if (state.leagueDegraded) {
+    refreshLeagueInBackground_();
+    return;
+  }
+
+  if (!state.pollingEnabled) return;
+
+  const age = Date.now() - Number(state.lastScoreRefreshAt || 0);
+
+  if (age > POLL_LIVE_MS) {
+    runScorePoll_();
+  } else {
+    scheduleNextScorePoll_();
+  }
+}
+
+/* =========================================================
+   STARTUP
+   ========================================================= */
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -170,112 +2311,36 @@ async function init() {
   const audit = FantasyPerf.start('INITIAL init');
 
   bindUi();
-  startLeagueLoader();
+
+  const cached = loadLeagueBrowserCache_();
+  const warm = Boolean(
+    cached &&
+    cached.data &&
+    cached.data.ok &&
+    cached.data.league &&
+    Array.isArray(cached.data.teams)
+  );
+
+  startLeagueLoader({ warm });
 
   try {
-    setLoaderTarget(22);
-
-    const leagueAudit = FantasyPerf.start('Startup league resilient');
-
-    let data = null;
-    let source = 'live';
-
-    try {
-      data = await jsonpWithRetry_('league', {}, LEAGUE_RETRY_DELAYS_MS);
-
-      if (data && data.ok) {
-        saveLeagueBrowserCache_(data);
-      }
-
-    } catch (liveError) {
-      const cached = loadLeagueBrowserCache_();
-
-      if (cached && cached.data && cached.data.ok) {
-        data = cached.data;
-        source = 'browser-cache';
-
-        FantasyPerf.log(
-          'League live request failed; using last-good browser cache',
-          {
-            cacheAgeMs: cached.ageMs,
-            error: liveError.message
-          }
-        );
-
-        setApiStatus(false, 'Cached Data · Reconnecting');
-
-        refreshLeagueInBackground_();
-
-      } else {
-        throw liveError;
-      }
+    if (warm) {
+      await initFromBrowserCache_(cached);
+    } else {
+      await initFromNetwork_();
     }
-
-    leagueAudit.end({
-      leagueOk: Boolean(data && data.ok),
-      source
-    });
-
-    if (!data || !data.ok) {
-      throw new Error(
-        data && data.error
-          ? data.error
-          : 'League API did not return data.'
-      );
-    }
-
-    setLoaderTarget(58);
-
-    const hydrateAudit = FantasyPerf.start('Hydrate league state');
-
-    hydrateState(data);
-
-    // The league summary can contain ESPN's lightweight schedule values,
-    // which may still be 0.00. Always replace the current week with the
-    // authoritative boxscore/live-scoring endpoint before the first render.
-    await refreshCurrentWeekMatchups_(false);
-
-    hydrateAudit.end({
-      teams: state.teams.length,
-      standings: state.standings.length,
-      currentMatchups: state.currentMatchups.length,
-      source
-    });
-
-    setLoaderTarget(78);
-
-    const renderAudit = FantasyPerf.start('Initial renderAll');
-
-    renderAll();
-    startCurrentWeekScorePolling_();
-
-    renderAudit.end();
-
-    setLoaderTarget(94);
-
-    if (source === 'live') {
-      setApiStatus(true, 'ESPN Connected');
-    }
-
-    const loaderAudit = FantasyPerf.start('Finish loader success');
-
-    await finishLeagueLoader(true);
-
-    loaderAudit.end();
 
     audit.end({
       success: true,
       teams: state.teams.length,
       currentWeek: state.selectedWeek,
-      source
+      source: warm ? 'browser-cache' : 'live'
     });
 
     FantasyPerf.log(
       `MAIN FANTASY PAGE TIME TO READY: ${FantasyPerf.nowFromNav().toFixed(1)} ms (${(FantasyPerf.nowFromNav() / 1000).toFixed(2)} sec)`,
-      { source }
+      { source: warm ? 'browser-cache' : 'live' }
     );
-
-    loadDraftboardInBackground_();
 
   } catch (error) {
     console.error(error);
@@ -284,19 +2349,115 @@ async function init() {
     renderFatalError(error);
 
     const loaderAudit = FantasyPerf.start('Finish loader error');
-
     await finishLeagueLoader(false);
-
     loaderAudit.end();
 
-    audit.fail(error, {
-      success: false
-    });
+    audit.fail(error, { success: false });
 
     FantasyPerf.log(
       `FANTASY PAGE FAILED AFTER: ${FantasyPerf.nowFromNav().toFixed(1)} ms (${(FantasyPerf.nowFromNav() / 1000).toFixed(2)} sec)`
     );
   }
+}
+
+/**
+ * WARM START: paint immediately from the last good data, then refresh in the
+ * background. The page is usable even if ESPN / Apps Script is down.
+ */
+async function initFromBrowserCache_(cached) {
+  const audit = FantasyPerf.start('Startup from browser cache', { cacheAgeMs: cached.ageMs });
+
+  hydrateState(cached.data, { source: 'browser-cache' });
+
+  // Saved scores can be hours old. Do not "animate" the catch-up to fresh data.
+  state.motionQuietUntil = Date.now() + MOTION_QUIET_AFTER_WARM_MS;
+  state.lastSyncAt = Number(cached.savedAt || 0);
+
+  const week = Number(state.league.currentWeek || 1);
+  const cachedMatchups = loadMatchupsBrowserCache_(week);
+
+  if (cachedMatchups && cachedMatchups.matchups.length) {
+    state.currentMatchups = cachedMatchups.matchups;
+    state.matchupsResolved = cachedMatchupsTrusted_(cachedMatchups);
+    state.weekCache.set(week, cachedMatchups.matchups);
+  }
+
+  renderAll();
+  setApiStatus(false, 'Cached Data · Updating');
+  startCurrentWeekScorePolling_();
+
+  audit.end({
+    teams: state.teams.length,
+    currentMatchups: state.currentMatchups.length,
+    matchupsFromCache: Boolean(cachedMatchups)
+  });
+
+  // Intentionally NOT awaited.
+  refreshLeagueInBackground_();
+}
+
+/**
+ * COLD START: league and matchups load in PARALLEL. The page renders as soon
+ * as the league arrives (matchups get a short grace period, then fill in).
+ */
+async function initFromNetwork_() {
+  setLoaderTarget(22);
+
+  const audit = FantasyPerf.start('Startup league + matchups (parallel)');
+
+  const leaguePromise = api_('league');
+  const matchupsPromise = api_('matchups').catch(error => {
+    console.warn('Startup matchups request failed:', error);
+    return null;
+  });
+
+  const data = await leaguePromise;
+
+  if (!data || !data.ok) {
+    throw new Error(data && data.error ? data.error : 'League API did not return data.');
+  }
+
+  saveLeagueBrowserCache_(data);
+  state.lastSyncAt = Date.now();
+  setLoaderTarget(58);
+
+  hydrateState(data, { source: 'live' });
+
+  const early = await Promise.race([
+    matchupsPromise,
+    wait(MATCHUPS_GRACE_MS).then(() => null)
+  ]);
+
+  const appliedEarly = applyMatchupsPayload_(early);
+  state.scoresStale = !appliedEarly;
+
+  setLoaderTarget(78);
+
+  renderAll();
+  startCurrentWeekScorePolling_();
+
+  setLoaderTarget(94);
+
+  setApiStatus(true, appliedEarly ? 'ESPN Connected' : 'Connected · Scores updating');
+
+  audit.end({
+    leagueOk: true,
+    matchupsWithinGrace: appliedEarly,
+    teams: state.teams.length
+  });
+
+  await finishLeagueLoader(true);
+
+  matchupsPromise.then(late => {
+    if (!late || late === early) return;
+
+    if (applyMatchupsPayload_(late)) {
+      setApiStatus(true, 'ESPN Connected');
+      if (Number(state.selectedWeek) === Number(state.league.currentWeek)) {
+        renderWeek(state.currentMatchups, state.selectedWeek);
+      }
+    }
+  });
 }
 
 async function jsonpWithRetry_(mode, params = {}, retryDelays = []) {
@@ -311,7 +2472,15 @@ async function jsonpWithRetry_(mode, params = {}, retryDelays = []) {
         params
       });
 
-      return await jsonp(mode, params);
+      const data = await jsonp(mode, params);
+
+      // A server-side error ({ ok:false }) is retried exactly like a
+      // network failure, and its real message is what finally surfaces.
+      if (data && data.ok === false) {
+        throw new Error(data.error || `The ${mode} request failed.`);
+      }
+
+      return data;
 
     } catch (error) {
       lastError = error;
@@ -323,6 +2492,10 @@ async function jsonpWithRetry_(mode, params = {}, retryDelays = []) {
 
       if (attempt >= delays.length) {
         break;
+      }
+
+      if (loaderState.timer && (mode === 'league' || mode === 'matchups')) {
+        setLoaderNote_('ESPN is slow to respond — retrying...');
       }
 
       const delayMs = Number(delays[attempt] || 0);
@@ -382,90 +2555,156 @@ function loadLeagueBrowserCache_() {
   }
 }
 
+
+/**
+ * Background revalidation after a warm start (or after a failed one).
+ * League + matchups load in parallel; failures keep the cached page.
+ */
 async function refreshLeagueInBackground_() {
-  const audit = FantasyPerf.start('BACKGROUND league recovery');
+  const audit = FantasyPerf.start('BACKGROUND league revalidate');
 
   try {
-    const fresh = await jsonpWithRetry_('league', {}, [3000, 6000]);
+    const previousMatchups = state.currentMatchups;
+    const previousResolved = state.matchupsResolved;
+    const previousWeek = Number(state.league && state.league.currentWeek || 0);
+
+    const leaguePromise = api_('league');
+    const matchupsPromise = api_('matchups').catch(() => null);
+
+    const fresh = await leaguePromise;
 
     if (!fresh || !fresh.ok) {
       throw new Error(
         fresh && fresh.error
           ? fresh.error
-          : 'League recovery did not return data.'
+          : 'League refresh did not return data.'
       );
     }
 
     saveLeagueBrowserCache_(fresh);
-    hydrateState(fresh);
-    await refreshCurrentWeekMatchups_(false);
-    renderAll();
+    state.lastSyncAt = Date.now();
+    hydrateState(fresh, { source: 'live' });
 
-    setApiStatus(true, 'ESPN Connected');
+    const early = await Promise.race([
+      matchupsPromise,
+      wait(MATCHUPS_GRACE_MS).then(() => null)
+    ]);
 
-    audit.end({
-      success: true,
-      refreshedUi: true
+    let applied = applyMatchupsPayload_(early);
+
+    // hydrateState swaps in ESPN's lightweight schedule values. If the
+    // resolved matchups are not back yet, keep the better cached ones.
+    if (!applied && Number(state.league.currentWeek) === previousWeek && previousMatchups && previousMatchups.length) {
+      state.currentMatchups = previousMatchups;
+      state.matchupsResolved = previousResolved;
+      state.weekCache.set(previousWeek, previousMatchups);
+    }
+
+    state.scoresStale = !applied;
+    state.leagueDegraded = false;
+    state.revalidateAttempts = 0;
+
+    renderAll({ preserveSelections: true });
+
+    setApiStatus(true, applied ? 'ESPN Connected' : 'Connected · Scores updating');
+
+    matchupsPromise.then(late => {
+      if (!late || late === early) return;
+
+      if (applyMatchupsPayload_(late)) {
+        setApiStatus(true, 'ESPN Connected');
+        if (Number(state.selectedWeek) === Number(state.league.currentWeek)) {
+          renderWeek(state.currentMatchups, state.selectedWeek);
+        }
+      }
     });
+
+    audit.end({ success: true, refreshedUi: true, matchupsApplied: applied });
 
   } catch (error) {
-    audit.fail(error, {
-      success: false,
-      cachedPageStillUsable: true
-    });
+    audit.fail(error, { success: false, cachedPageStillUsable: true });
 
-    setApiStatus(false, 'Cached Data');
+    state.leagueDegraded = true;
+    setApiStatus(false, 'Cached Data · Reconnecting');
+
+    const delay = REVALIDATE_RETRY_DELAYS_MS[state.revalidateAttempts];
+    state.revalidateAttempts += 1;
+
+    if (delay != null) {
+      window.setTimeout(() => {
+        if (state.leagueDegraded && !document.hidden) refreshLeagueInBackground_();
+      }, delay);
+    }
   }
 }
 
-async function loadDraftboardInBackground_() {
-  const audit =
-    FantasyPerf.start('BACKGROUND draftboard');
+/**
+ * The draft is only fetched when someone opens the Draft tab. A COMPLETE
+ * draft is cached in the browser, so repeat visits are instant.
+ */
+async function ensureDraftLoaded_(force = false) {
+  if (!force && (state.draft || state.draftLoadState === 'loading')) return;
+
+  state.draftLoadState = 'loading';
+
+  if (!force) {
+    const cachedDraft = loadDraftBrowserCache_();
+
+    if (cachedDraft) {
+      hydrateDraftState(cachedDraft);
+
+      if (state.draft) {
+        state.draftLoadState = 'ready';
+        return;
+      }
+    }
+  }
+
+  if (!state.draft) renderDraftDay();
+
+  const audit = FantasyPerf.start('LAZY draftboard');
 
   try {
-    const draftData =
-      await jsonp('draftboard');
+    const draftData = await api_('draftboard');
 
     hydrateDraftState(draftData);
+    state.draftLoadState = state.draft ? 'ready' : 'error';
+    saveDraftBrowserCache_(draftData);
 
     audit.end({
-      success: Boolean(
-        draftData &&
-        draftData.ok
-      ),
-      picks:
-        Number(
-          draftData &&
-          draftData.draft &&
-          Array.isArray(draftData.draft.picks)
-            ? draftData.draft.picks.length
-            : 0
-        )
+      success: Boolean(draftData && draftData.ok),
+      picks: Number(draftData && draftData.draft && Array.isArray(draftData.draft.picks) ? draftData.draft.picks.length : 0)
     });
 
   } catch (error) {
-    /*
-     * Draft failure should not downgrade the whole league page.
-     * Draft tab already knows how to render unavailable data.
-     */
-    state.draft = null;
+    audit.fail(error, { success: false });
+    console.warn('Draftboard load failed:', error);
 
-    audit.fail(error, {
-      success: false,
-      backgroundOnly: true
-    });
-
-    console.warn(
-      'Draftboard background load failed:',
-      error
-    );
+    state.draftLoadState = state.draft ? 'ready' : 'error';
+    if (!state.draft) renderDraftDay();
   }
 }
 
-
-function startLeagueLoader() {
+function startLeagueLoader(options = {}) {
   const loader = document.getElementById('leagueLoader');
   if (!loader) return;
+
+  // WARM START: cached data exists, so the belt animation would only delay a
+  // page that is already ready. Remove it before it can flash.
+  if (options.warm) {
+    loaderState.disabled = true;
+    document.documentElement.classList.remove('has-warm-cache');
+    loader.remove();
+    document.body.classList.remove('is-loading');
+    return;
+  }
+
+  // COLD START: the head script may have hidden the loader for a cache we
+  // then rejected (expired / corrupt). Make sure it is visible again.
+  document.documentElement.classList.remove('has-warm-cache');
+
+  // Already saw the full animation this session -> do not make people wait.
+  loaderState.minimumMs = safeSessionGet_(LOADER_SEEN_KEY) ? 0 : LOADER_MINIMUM_MS;
 
   document.body.classList.add('is-loading');
 
@@ -473,7 +2712,15 @@ function startLeagueLoader() {
   loaderState.target = 16;
 
   loaderState.timer = window.setInterval(() => {
-    if (loaderState.progress >= loaderState.target) return;
+    // While waiting on a slow ESPN response, creep the bar forward so the
+    // loader never looks frozen (it stops well before the next stage).
+    if (loaderState.progress >= loaderState.target) {
+      if (loaderState.target < 40) {
+        loaderState.target += 0.05;
+      } else {
+        return;
+      }
+    }
 
     const remaining = loaderState.target - loaderState.progress;
     const step = Math.max(.35, Math.min(1.8, remaining * .08));
@@ -503,13 +2750,15 @@ function updateLoaderUi(value) {
 
   if (currentStage) {
     if (stage) stage.textContent = currentStage.text;
-    if (message) message.textContent = currentStage.message;
+    if (message) message.textContent = loaderState.note || currentStage.message;
   }
 }
 
 async function finishLeagueLoader(success) {
   const loader = document.getElementById('leagueLoader');
-  if (!loader) return;
+  if (!loader || loaderState.disabled) return;
+
+  loaderState.note = null;
 
   if (loaderState.timer) {
     window.clearInterval(loaderState.timer);
@@ -522,6 +2771,7 @@ async function finishLeagueLoader(success) {
 
   if (success) {
     if (headline) headline.textContent = 'WELCOME TO ZENNI LEAGUE';
+    safeSessionSet_(LOADER_SEEN_KEY, '1');
     if (message) message.textContent = 'The championship race begins now.';
     if (stage) stage.textContent = 'Ready';
   } else {
@@ -532,19 +2782,25 @@ async function finishLeagueLoader(success) {
 
   loaderState.target = 100;
 
-  while (loaderState.progress < 100) {
-    updateLoaderUi(Math.min(100, loaderState.progress + 3.4));
-    await wait(18);
+  const instant = Number(loaderState.minimumMs) === 0;
+
+  if (instant) {
+    updateLoaderUi(100);
+  } else {
+    while (loaderState.progress < 100) {
+      updateLoaderUi(Math.min(100, loaderState.progress + 3.4));
+      await wait(18);
+    }
   }
 
   const elapsed = Date.now() - loaderState.startedAt;
-  if (elapsed < LOADER_MINIMUM_MS) {
-    await wait(LOADER_MINIMUM_MS - elapsed);
+  if (elapsed < loaderState.minimumMs) {
+    await wait(loaderState.minimumMs - elapsed);
   }
 
   loader.classList.add(success ? 'is-ready' : 'is-error');
 
-  await wait(420);
+  await wait(instant ? 120 : 420);
 
   loader.classList.add('is-hidden');
   document.body.classList.remove('is-loading');
@@ -573,6 +2829,42 @@ function bindUi() {
       switchView(link.dataset.tabTarget);
     });
   });
+
+  document.querySelectorAll('[data-mine-pick]').forEach(button => button.addEventListener('click', openTeamPicker_));
+
+  const picker = document.getElementById('teamPicker');
+  if (picker) picker.addEventListener('click', event => { if (event.target === picker) picker.close(); });
+
+  const shareModal = document.getElementById('shareModal');
+  if (shareModal) {
+    shareModal.addEventListener('click', event => { if (event.target === shareModal) shareModal.close(); });
+    shareModal.addEventListener('close', releaseShareUrl_);
+  }
+
+  const staleRetry = document.querySelector('[data-stale-retry]');
+  if (staleRetry) {
+    staleRetry.addEventListener('click', () => {
+      if (state.leagueDegraded) {
+        refreshLeagueInBackground_();
+      } else {
+        refreshCurrentWeekMatchups_(true);
+      }
+    });
+  }
+
+  if (!state.freshnessTimer) {
+    state.freshnessTimer = window.setInterval(renderApiFreshness_, 30000);
+  }
+
+  const recapOpen = document.getElementById('recapOpen');
+  if (recapOpen) {
+    recapOpen.addEventListener('click', () => {
+      state.recapForced = true;
+      syncRecapState_();
+      const section = document.getElementById('weekRecap');
+      if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
 
   document.getElementById('prevWeek').addEventListener('click', () => changeWeek(-1));
   document.getElementById('nextWeek').addEventListener('click', () => changeWeek(1));
@@ -617,6 +2909,7 @@ function switchView(view) {
 
   if (nextView === 'awards') {
     renderWeeklyAwards_(state.awardsWeek || getDefaultAwardsWeek_());
+    scheduleSeasonBoard_();
   }
 
   if (nextView === 'grades') {
@@ -636,16 +2929,18 @@ function switchView(view) {
   }
 
   if (nextView === 'draft') {
-    renderDraftDay();
+    ensureDraftLoaded_();
+    if (state.draft) renderDraftDay();
   }
 }
 
-function hydrateState(data) {
+function hydrateState(data, options = {}) {
   state.league = data.league;
   state.teams = Array.isArray(data.teams) ? data.teams : [];
   state.teamMap = new Map(state.teams.map(team => [Number(team.id), team]));
   state.standings = Array.isArray(data.standings) ? data.standings : [];
   state.currentMatchups = Array.isArray(data.currentMatchups) ? data.currentMatchups : [];
+  state.matchupsResolved = false;
   state.selectedWeek = Number(data.league.currentWeek || 1);
   state.weekCache.set(state.selectedWeek, state.currentMatchups);
 
@@ -655,7 +2950,7 @@ function hydrateState(data) {
 
   const generated = data.generatedAt ? new Date(data.generatedAt) : new Date();
   document.getElementById('lastUpdated').textContent =
-    `Last ESPN sync: ${generated.toLocaleString()}`;
+    `Last ESPN sync: ${generated.toLocaleString()}${options.source === 'browser-cache' ? ' (cached)' : ''}`;
 
   const preseason = Number(state.league.latestScoringPeriod || 0) < 1;
   document.getElementById('standingsNote').textContent = preseason
@@ -693,8 +2988,15 @@ function renderDraftDay() {
 
   const draft = state.draft;
   if (!draft) {
-    grid.classList.remove('skeleton-block');
-    grid.innerHTML = '<div class="draft-error">Draft data is not available from ESPN yet.</div>';
+    if (state.draftLoadState === 'error') {
+      grid.classList.remove('skeleton-block');
+      grid.innerHTML = '<div class="draft-error">The draft board could not be loaded. <button type="button" class="performer-tab" data-draft-retry>Retry</button></div>';
+      const retry = grid.querySelector('[data-draft-retry]');
+      if (retry) retry.addEventListener('click', () => ensureDraftLoaded_(true));
+    } else {
+      grid.classList.add('skeleton-block');
+      grid.innerHTML = '<div class="draft-error">Loading the draft board…</div>';
+    }
     return;
   }
 
@@ -939,6 +3241,12 @@ function startDraftCountdown(date, status) {
       setText('draftMinutes', '00');
       setText('draftSeconds', '00');
       updateDraftStatus(status === 'COMPLETE' ? 'COMPLETE' : status === 'LIVE' ? 'LIVE' : 'STARTING');
+
+      // Nothing left to count down: stop ticking every second forever.
+      if (state.draftCountdownTimer) {
+        window.clearInterval(state.draftCountdownTimer);
+        state.draftCountdownTimer = null;
+      }
       return;
     }
 
@@ -970,16 +3278,25 @@ function setText(id, value) {
   if (element) element.textContent = value;
 }
 
-function renderAll() {
+function renderAll(options = {}) {
   renderChampionSpotlight();
   renderStandings();
   renderStandingsPreview();
   renderTeamGallery();
   renderGlanceRibbon();
-  state.awardsWeek = getDefaultAwardsWeek_();
-  state.gradesWeek = Number(state.league && state.league.currentWeek || state.selectedWeek || 1);
+
+  // A background refresh must not yank the user back to a different week.
+  if (!options.preserveSelections) {
+    state.awardsWeek = getDefaultAwardsWeek_();
+    state.gradesWeek = Number(state.league && state.league.currentWeek || state.selectedWeek || 1);
+  }
+
   renderGradesWeekTabs_();
-  renderAllTimeTopStats_();
+
+  // The season record book lives in the Weekly Awards tab now, so it only
+  // loads when someone is actually looking at it.
+  if (state.activeView === 'awards') scheduleSeasonBoard_();
+
   renderWeek(state.currentMatchups, state.selectedWeek);
 }
 
@@ -989,7 +3306,23 @@ function renderWeek(matchups, week) {
   renderOverviewMatchups(matchups, week);
   renderFeaturedMatchup(matchups, week);
   renderBattleCenter(matchups, week);
-  if (Number(state.gradesWeek || week) === Number(week)) renderWeeklyTeamGrades(matchups, week);
+
+  // The strip is drawn BEFORE the motion pass so its scores can animate too.
+  if (Number(week) === Number(state.league && state.league.currentWeek)) renderMyTeamStrip_();
+
+  applyMatchupMotion_(matchups, week);
+  applyMyTeamHighlights_();
+
+  // Grades are expensive (a full-roster request). Only build them while the
+  // Grades tab is actually open; opening the tab loads them on demand.
+  if (state.activeView === 'grades' && Number(state.gradesWeek || week) === Number(week)) {
+    renderWeeklyTeamGrades(matchups, week);
+  }
+
+  // The recap decides for itself whether it should be on screen.
+  if (Number(week) === Number(state.league && state.league.currentWeek)) {
+    syncRecapState_();
+  }
 }
 
 function syncWeekLabels(week) {
@@ -1045,75 +3378,182 @@ function getDefaultAwardsWeek_() {
   return Math.max(1, latest || Math.max(1, current - 1));
 }
 
+function currentWeekHasPoints_() {
+  return (Array.isArray(state.currentMatchups) ? state.currentMatchups : [])
+    .some(match => String(match && match.status || '').toUpperCase() !== 'SCHEDULED');
+}
+
+function scheduleSeasonBoard_() {
+  const currentWeek = Number(state.league && state.league.currentWeek || 1);
+  const latest = Number(state.league && state.league.latestScoringPeriod || 0);
+  const key = `${currentWeek}|${latest}|${currentWeekHasPoints_() ? 1 : 0}`;
+
+  // Already built for exactly this league state.
+  if (state.seasonBoardKey === key && state.allTimePerformanceCache) return;
+
+  state.seasonBoardKey = key;
+
+  if (state.seasonBoardTimer) window.clearTimeout(state.seasonBoardTimer);
+
+  // Everything cached -> paint right now, no network involved. Only a board
+  // that must ask Apps Script for historical weeks waits for the first
+  // screen to finish loading.
+  const delay = seasonBoardNeedsNetwork_() ? SEASON_BOARD_DELAY_MS : 0;
+
+  state.seasonBoardTimer = window.setTimeout(() => {
+    state.seasonBoardTimer = null;
+    renderAllTimeTopStats_();
+  }, delay);
+}
+
+function seasonBoardNeedsNetwork_() {
+  const currentWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
+  const lastWeek = currentWeekHasPoints_() ? currentWeek : Math.max(1, currentWeek - 1);
+  const poolCache = loadSeasonPoolCache_();
+
+  for (let week = 1; week <= lastWeek; week += 1) {
+    if (!seasonPoolFresh_(poolCache[String(week)], week, currentWeek)) return true;
+  }
+
+  return false;
+}
+
+function pooledStartersForWeek_(snapshots, week) {
+  const pool = [];
+
+  snapshots.forEach(snapshot => {
+    const { team, roster } = snapshot;
+
+    roster.forEach(player => {
+      if (player.isStarter !== true) return;
+
+      const points = getWeeklyPlayerPoints(player, week);
+      const position = normalizeFantasyPosition(player.position || player.lineupSlot);
+      const lineupSlot = normalizeTopPerformerSlot_(player.lineupSlot || player.slot);
+
+      if (!position || points == null) return;
+
+      pool.push({
+        playerId: Number(player.playerId || player.id || 0),
+        name: player.name || 'Unknown Player',
+        position,
+        lineupSlot,
+        points,
+        week,
+        nflTeam: getPlayerNflTeam(player),
+        fantasyTeamId: Number(team.id)
+      });
+    });
+  });
+
+  return pool;
+}
+
 async function renderAllTimeTopStats_() {
   const container = document.getElementById('overviewTopStats');
   if (!container) return;
   const requestToken = ++state.allTimeRequestToken;
 
-  container.classList.add('skeleton-block');
-  container.innerHTML = `
-    <div class="performers-loading">
-      <strong>Building 2026 season record board...</strong>
-      <span>ALL · QB · RB · WR · TE · FLEX · K · D/ST</span>
-    </div>
-  `;
+  const currentWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
 
-  try {
-    const maxWeek = Math.max(
-      1,
-      Number(state.league && state.league.latestScoringPeriod || 0),
-      Number(state.league && state.league.currentWeek || 1)
-    );
+  // A week that has not kicked off has no points to rank yet.
+  const lastWeek = currentWeekHasPoints_() ? currentWeek : Math.max(1, currentWeek - 1);
+
+  const poolCache = loadSeasonPoolCache_();
+  const poolsByWeek = new Map();
+  const weeksToLoad = [];
+  const missingWeeks = [];
+
+  for (let week = 1; week <= lastWeek; week += 1) {
+    const entry = poolCache[String(week)];
+
+    if (seasonPoolFresh_(entry, week, currentWeek)) {
+      poolsByWeek.set(week, entry.pool);
+    } else {
+      weeksToLoad.push(week);
+    }
+  }
+
+  const teamName = id => {
+    const team = state.teamMap.get(Number(id));
+    return team ? team.name : `Team ${id}`;
+  };
+
+  const paint = () => {
     const seasonPool = [];
-    const missingWeeks = [];
-    let loadedWeeks = 0;
 
-    for (let week = 1; week <= maxWeek; week += 1) {
-      let snapshots;
+    Array.from(poolsByWeek.keys()).sort((a, b) => a - b).forEach(week => {
+      poolsByWeek.get(week).forEach(item => {
+        seasonPool.push({ ...item, fantasyTeam: teamName(item.fantasyTeamId) });
+      });
+    });
+
+    state.allTimeMissingWeeks = missingWeeks.slice().sort((a, b) => a - b);
+    state.allTimePerformanceCache = seasonPool;
+
+    container.classList.remove('skeleton-block');
+    renderAllTimePerformerLeaderboard_(container, seasonPool);
+  };
+
+  if (poolsByWeek.size) {
+    paint();
+  } else {
+    container.classList.add('skeleton-block');
+    container.innerHTML = `
+      <div class="performers-loading">
+        <strong>Building 2026 season record board...</strong>
+        <span>ALL · QB · RB · WR · TE · FLEX · K · D/ST</span>
+      </div>
+    `;
+  }
+
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < weeksToLoad.length) {
+      const week = weeksToLoad[nextIndex];
+      nextIndex += 1;
+
       try {
-        snapshots = await getWeekRosterSnapshots_(week);
+        const snapshots = await getWeekRosterSnapshots_(week);
+        if (requestToken !== state.allTimeRequestToken) return;
+
+        const pool = pooledStartersForWeek_(snapshots, week);
+        poolsByWeek.set(week, pool);
+
+        // Only finished weeks are stored. The live week is never cached.
+        if (week < currentWeek) {
+          poolCache[String(week)] = { savedAt: Date.now(), pool };
+        }
       } catch (error) {
         if (requestToken !== state.allTimeRequestToken) return;
         missingWeeks.push(week);
-        continue;
       }
-      if (requestToken !== state.allTimeRequestToken) return;
-      loadedWeeks += 1;
-      snapshots.forEach(snapshot => {
-        const { team, roster } = snapshot;
-        roster.forEach(player => {
-          if (player.isStarter !== true) return;
-          const points = getWeeklyPlayerPoints(player, week);
-          const position = normalizeFantasyPosition(player.position || player.lineupSlot);
-          const lineupSlot = normalizeTopPerformerSlot_(player.lineupSlot || player.slot);
-          if (!position || points == null) return;
-          seasonPool.push({
-            playerId: Number(player.playerId || player.id || 0),
-            name: player.name || 'Unknown Player',
-            position,
-            lineupSlot,
-            points,
-            week,
-            nflTeam: getPlayerNflTeam(player),
-            fantasyTeam: team.name,
-            fantasyTeamId: Number(team.id)
-          });
-        });
-      });
-    }
 
-    if (requestToken !== state.allTimeRequestToken) return;
-    state.allTimeMissingWeeks = missingWeeks;
-    if (!loadedWeeks) throw new Error('Weekly scoring data is temporarily unavailable. Please retry.');
-    state.allTimePerformanceCache = seasonPool;
-    container.classList.remove('skeleton-block');
-    renderAllTimePerformerLeaderboard_(container, seasonPool);
-  } catch (error) {
-    if (requestToken !== state.allTimeRequestToken) return;
-    container.classList.remove('skeleton-block');
-    container.innerHTML = `<div class="performers-empty"><strong>Unable to load season records.</strong><span>${escapeHtml(error.message || String(error))}</span><button type="button" class="performer-tab" data-retry-season>Retry</button></div>`;
-    container.querySelector('[data-retry-season]').addEventListener('click', renderAllTimeTopStats_);
+      if (requestToken !== state.allTimeRequestToken) return;
+      paint();
+    }
+  };
+
+  const workers = [];
+  for (let n = 0; n < Math.min(SEASON_BOARD_CONCURRENCY, weeksToLoad.length); n += 1) {
+    workers.push(worker());
   }
+
+  await Promise.all(workers);
+
+  if (requestToken !== state.allTimeRequestToken) return;
+
+  saveSeasonPoolCache_(poolCache);
+
+  if (!poolsByWeek.size) {
+    container.classList.remove('skeleton-block');
+    container.innerHTML = `<div class="performers-empty"><strong>Unable to load season records.</strong><span>Weekly scoring data is temporarily unavailable. Please retry.</span><button type="button" class="performer-tab" data-retry-season>Retry</button></div>`;
+    container.querySelector('[data-retry-season]').addEventListener('click', () => renderAllTimeTopStats_());
+    return;
+  }
+
+  paint();
 }
 
 function renderAllTimePerformerLeaderboard_(container, playerPool) {
@@ -1147,7 +3587,7 @@ function renderAllTimePerformerLeaderboard_(container, playerPool) {
     </div>`;
 
   const retry = container.querySelector('[data-retry-season]');
-  if (retry) retry.addEventListener('click', renderAllTimeTopStats_);
+  if (retry) retry.addEventListener('click', () => renderAllTimeTopStats_());
 
   container.querySelectorAll('[data-alltime-position]').forEach(button => {
     button.addEventListener('click', () => {
@@ -1249,7 +3689,7 @@ async function getWeekPerformance_(week) {
   const cached = state.weekPerformanceCache.get(key);
   if (cached && (cached.pending || cached.expiresAt > Date.now())) return cached.promise;
   const record = { pending: true, expiresAt: 0, promise: null };
-  record.promise = jsonp('performance', { week: key }).then(data => {
+  record.promise = api_('performance', { week: key }).then(data => {
     if (!data || data.ok === false || Number(data.scoringPeriodId) !== key ||
         data.source !== 'weekly-boxscore-v10' || !Array.isArray(data.teams) ||
         !Array.isArray(data.matchups)) {
@@ -1556,6 +3996,8 @@ function renderFeaturedMatchup(matchups, week) {
     <div class="vs-mark">VS</div>
     ${featuredTeamMarkup(away, featured.awayScore, 'right')}
   `;
+
+  container.dataset.matchupKey = battleMatchupKey_(featured, week);
 }
 
 function chooseFeaturedMatchup(matchups, week) {
@@ -2350,7 +4792,7 @@ async function getWeekMatchups(week) {
     return state.weekCache.get(targetWeek);
   }
 
-  const data = await jsonp('matchups', { week: targetWeek, _ts: Date.now() });
+  const data = await api_('matchups', { week: targetWeek });
   const matchups = Array.isArray(data.matchups) ? data.matchups : [];
   state.weekCache.set(targetWeek, matchups);
 
@@ -2365,12 +4807,22 @@ async function refreshCurrentWeekMatchups_(render = true) {
   const currentWeek = Number(state.league && state.league.currentWeek || state.selectedWeek || 1);
 
   try {
-    const data = await jsonp('matchups', { week: currentWeek, _ts: Date.now() });
+    const data = await api_('matchups', { week: currentWeek });
     const matchups = Array.isArray(data.matchups) ? data.matchups : [];
+
+    state.lastScoreRefreshAt = Date.now();
+    state.lastSyncAt = Date.now();
 
     if (matchups.length) {
       state.currentMatchups = matchups;
+      state.matchupsResolved = true;
       state.weekCache.set(currentWeek, matchups);
+      saveMatchupsBrowserCache_(currentWeek, matchups);
+
+      if (state.scoresStale || state.leagueDegraded === false) {
+        setApiStatus(true, 'ESPN Connected');
+      }
+      state.scoresStale = false;
 
       if (render && Number(state.selectedWeek) === currentWeek) {
         renderWeek(matchups, currentWeek);
@@ -2380,26 +4832,12 @@ async function refreshCurrentWeekMatchups_(render = true) {
     return matchups;
   } catch (error) {
     console.warn('Current-week score refresh failed:', error);
+
+    // Keep showing the last known scores, but say so.
+    state.scoresStale = true;
+    setApiStatus(false, 'Scores delayed · retrying');
+
     return state.currentMatchups || [];
-  }
-}
-
-function startCurrentWeekScorePolling_() {
-  stopCurrentWeekScorePolling_();
-
-  state.scoreSyncTimer = window.setInterval(async () => {
-    await refreshCurrentWeekMatchups_(true);
-
-    if (state.activeView === 'battle' && state.battleCastOpen) {
-      loadBattleFantasyCast_(true);
-    }
-  }, 60000);
-}
-
-function stopCurrentWeekScorePolling_() {
-  if (state.scoreSyncTimer) {
-    window.clearInterval(state.scoreSyncTimer);
-    state.scoreSyncTimer = null;
   }
 }
 
@@ -2505,7 +4943,8 @@ function renderBattleCenter(matchups, week) {
 
   // New week or stale selection: start with Match of the Week open.
   if (!state.battleCastSelectedKey || !validKeys.has(state.battleCastSelectedKey)) {
-    state.battleCastSelectedKey = featuredKey;
+    // Followers land on their own matchup; everyone else on Match of the Week.
+    state.battleCastSelectedKey = myMatchupKeyIn_(matchups, week) || featuredKey;
     state.battleCastOpen = true;
   }
 
@@ -2840,7 +5279,8 @@ async function loadBattleFantasyCast_(force = false) {
   const requestSeq = ++state.battleCastRequestSeq;
 
   const container = document.getElementById('battleFantasyCast');
-  if (container && state.battleCastOpen) {
+  const keepPanel = Boolean(force && container && container.querySelector('.fantasycast-shell'));
+  if (container && state.battleCastOpen && !keepPanel) {
     container.classList.add('is-open');
     container.innerHTML = `
       <div class="fantasycast-loading">
@@ -2853,8 +5293,8 @@ async function loadBattleFantasyCast_(force = false) {
 
   try {
     const [homeData, awayData] = await Promise.all([
-      jsonp('roster', { teamId: homeId }),
-      jsonp('roster', { teamId: awayId })
+      api_('roster', { teamId: homeId }),
+      api_('roster', { teamId: awayId })
     ]);
 
     // User may have clicked another matchup while these requests were loading.
@@ -2868,6 +5308,8 @@ async function loadBattleFantasyCast_(force = false) {
 
     const homeRoster = Array.isArray(homeData && homeData.roster) ? homeData.roster : [];
     const awayRoster = Array.isArray(awayData && awayData.roster) ? awayData.roster : [];
+
+    detectCastPlays_(week, selected, homeRoster, awayRoster);
 
     state.battleCastCache.set(cacheKey, {
       savedAt: Date.now(),
@@ -2915,6 +5357,7 @@ function startBattleFantasyCastPolling_() {
       stopBattleFantasyCastPolling_();
       return;
     }
+    if (document.hidden) return;
     if (state.battleCastOpen) {
       loadBattleFantasyCast_(true);
     }
@@ -3049,6 +5492,8 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
   `;
 
   container.classList.add('is-open');
+
+  applyCastMotion_(container, match, week, { homeScore, awayScore, chance, home, away });
 
   const closeButton = container.querySelector('[data-fantasycast-close]');
   if (closeButton) {
@@ -3589,7 +6034,7 @@ function renderConferenceStandings(divisionId, targetId) {
     const rank = row.divisionRank == null ? '--' : row.divisionRank;
 
     return `
-      <tr>
+      <tr data-team-id="${row.teamId}">
         <td class="${rank === '--' ? 'rank-dash' : ''}">${rank}</td>
         <td>
           <div class="standings-team">
@@ -3655,6 +6100,7 @@ async function openTeamModal(teamId) {
         <span class="section-kicker">${escapeHtml(team ? team.division : '')}</span>
         <h2>${escapeHtml(team ? team.name : 'Team')}</h2>
         <p>${escapeHtml(team ? ownerText(team) : '')}</p>
+        <button type="button" class="follow-button" data-follow-toggle></button>
       </div>
     </div>
     <div class="roster-list">
@@ -3664,8 +6110,24 @@ async function openTeamModal(teamId) {
 
   modal.showModal();
 
+  const followButton = content.querySelector('[data-follow-toggle]');
+  if (followButton) {
+    const syncFollow = () => {
+      const mine = getMyTeamId_() === Number(teamId);
+      followButton.textContent = mine ? '★ My team · tap to unfollow' : '☆ This is my team';
+      followButton.classList.toggle('is-on', mine);
+    };
+
+    syncFollow();
+
+    followButton.addEventListener('click', () => {
+      setMyTeamId_(getMyTeamId_() === Number(teamId) ? null : Number(teamId));
+      syncFollow();
+    });
+  }
+
   try {
-    const data = await jsonp('roster', { teamId });
+    const data = await api_('roster', { teamId });
     const roster = Array.isArray(data.roster) ? data.roster : [];
 
     content.querySelector('.roster-list').innerHTML = roster.length
@@ -3691,15 +6153,28 @@ function renderFatalError(error) {
 
   ['featuredMatchup', 'leaguePulse', 'overviewTopStats', 'overviewMatchups', 'battleFeatured', 'battleGrid', 'standingsPreview', 'championSpotlight'].forEach(id => {
     const element = document.getElementById(id);
-    if (element) element.innerHTML = `<div class="error-panel">${message}</div>`;
+    if (element) {
+      element.innerHTML = `<div class="error-panel">${message}<div class="fatal-actions"><button type="button" class="performer-tab" data-fatal-retry>Try again</button></div></div>`;
+    }
+  });
+
+  document.querySelectorAll('[data-fatal-retry]').forEach(button => {
+    button.addEventListener('click', () => window.location.reload());
   });
 }
 
 function setApiStatus(ok, text) {
   const pill = document.getElementById('apiStatus');
-  pill.classList.remove('is-live', 'is-error');
+  pill.classList.remove('is-live', 'is-error', 'is-refreshing');
   pill.classList.add(ok ? 'is-live' : 'is-error');
-  pill.querySelector('span:last-child').textContent = text;
+
+  // "Updating" / "refreshing" = a request is in flight right now.
+  if (/updating|refreshing|reconnecting/i.test(String(text))) pill.classList.add('is-refreshing');
+
+  const label = pill.querySelector('.api-text') || pill.querySelector('span:last-child');
+  label.textContent = text;
+
+  renderApiFreshness_();
 }
 
 function getTeamIcon(team) {
@@ -3732,6 +6207,7 @@ function number2(value) {
 
 function jsonp(mode, params = {}) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = API_TIMEOUT_MS[mode] || API_TIMEOUT_MS._default;
     const audit = FantasyPerf.start(`JSONP ${mode}`, { params });
     const startedAt = performance.now();
 
@@ -3794,7 +6270,7 @@ function jsonp(mode, params = {}) {
 
       FantasyPerf.log(`JSONP ${mode} TIMEOUT`, {
         elapsedMs: Number(elapsedMs.toFixed(1)),
-        timeoutMs: 15000,
+        timeoutMs: timeoutMs,
         params
       });
 
@@ -3803,12 +6279,12 @@ function jsonp(mode, params = {}) {
 
       audit.fail(error, {
         timeout: true,
-        timeoutMs: 15000,
+        timeoutMs: timeoutMs,
         params
       });
 
       reject(error);
-    }, 15000);
+    }, timeoutMs);
 
     window[callback] = data => {
       if (settled) return;

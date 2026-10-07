@@ -8,6 +8,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Returning visitors: hide the intro loader before first paint so cached data shows instantly. -->
+  <script>try{if(localStorage.getItem('ZENNI_FANTASY_LEAGUE_LAST_GOOD_V1')){document.documentElement.classList.add('has-warm-cache');}}catch(e){}</script>
+  <style>html.has-warm-cache #leagueLoader{display:none!important}html.has-warm-cache body.is-loading{overflow:auto!important}</style>
   <link rel="stylesheet" href="fantasy.css">
 </head>
 <body>
@@ -91,13 +94,14 @@
 
       <div class="live-pill" id="apiStatus">
         <span class="status-dot"></span>
-        <span>Connecting...</span>
+        <span class="api-text">Connecting...</span>
+        <span class="api-age" id="apiAge" hidden></span>
       </div>
     </header>
 
     <div class="mobile-tabs" aria-label="League sections">
       <button class="mobile-tab is-active" type="button" data-tab="overview">Overview</button>
-      <button class="mobile-tab battle-nav" type="button" data-tab="battle">⚔ Battle</button>
+      <button class="mobile-tab battle-nav" type="button" data-tab="battle">Battle</button>
       <button class="mobile-tab" type="button" data-tab="grades">Grades</button>
       <button class="mobile-tab" type="button" data-tab="awards">Awards</button>
       <button class="mobile-tab" type="button" data-tab="standings">Standings</button>
@@ -105,10 +109,19 @@
       <button class="mobile-tab draft-nav" type="button" data-tab="draft">Draft</button>
     </div>
 
+    <div class="stale-banner" id="staleBanner" role="status" hidden>
+      <span data-stale-text>ESPN is slow to respond. Showing saved scores. Retrying…</span>
+      <button type="button" data-stale-retry>Try now</button>
+    </div>
+
     <main id="top">
       <section class="view-panel is-active" data-view="overview">
         <section class="overview-command-layout">
-          <section class="hero hero-command">
+          <section class="my-strip" id="myTeamStrip" hidden aria-label="My team"></section>
+
+          <section class="week-recap" id="weekRecap" hidden aria-label="Weekly recap" aria-live="polite"></section>
+
+          <section class="hero hero-command" id="overviewHero">
             <div class="hero-backdrop" aria-hidden="true"></div>
             <div class="hero-overlay" aria-hidden="true"></div>
 
@@ -119,6 +132,11 @@
 
               <button class="hero-battle-cta" type="button" data-tab-open="battle">
                 <span>Enter Battle Center</span>
+                <strong>→</strong>
+              </button>
+
+              <button class="hero-recap-cta" id="recapOpen" type="button" hidden>
+                <span>Last week's recap</span>
                 <strong>→</strong>
               </button>
 
@@ -146,21 +164,7 @@
             </div>
           </section>
 
-          <div class="overview-stats-row overview-records-row">
-            <section class="feature-card top-stats-card top-performers-card all-time-performers-card">
-              <div class="section-heading compact-heading performers-heading">
-                <div>
-                  <span class="section-kicker">All-Time Leaders</span>
-                  <h2>Top Performances</h2>
-                  <p class="performers-subtitle">Top 5 single-game starter performances of the 2026 season</p>
-                </div>
-                <span class="performers-week season-record-chip">2026 Season</span>
-              </div>
-              <div class="top-stats-grid performers-grid skeleton-block" id="overviewTopStats"></div>
-            </section>
-
-            <article class="feature-card spotlight-card" id="championSpotlight"></article>
-          </div>
+          <div class="overview-section-label" id="thisWeekLabel" hidden><span>This week</span></div>
 
           <div class="overview-bottom-row">
             <article class="feature-card game-card command-motw-card">
@@ -213,7 +217,6 @@
             </article>
           </div>
 
-          <section class="glance-ribbon" id="glanceRibbon"></section>
         </section>
       </section>
 
@@ -292,6 +295,20 @@
               <div id="awardsLeaguePulse" class="pulse-list weekly-spotlight-list skeleton-block"></div>
             </article>
           </div>
+
+          <div class="season-records-section">
+            <section class="feature-card top-stats-card top-performers-card all-time-performers-card">
+              <div class="section-heading compact-heading performers-heading">
+                <div>
+                  <span class="section-kicker">Record Book</span>
+                  <h2>Season Records</h2>
+                  <p class="performers-subtitle">Top 5 single-game starter performances of the 2026 season</p>
+                </div>
+                <span class="performers-week season-record-chip">2026 Season</span>
+              </div>
+              <div class="top-stats-grid performers-grid skeleton-block" id="overviewTopStats"></div>
+            </section>
+          </div>
         </section>
       </section>
 
@@ -321,6 +338,8 @@
             </div>
             <span class="preseason-note" id="standingsNote">Preseason — rankings begin after Week 1</span>
           </div>
+
+          <section class="glance-ribbon" id="glanceRibbon"></section>
 
           <div class="conference-grid">
             <article class="standings-card afc-card">
@@ -382,6 +401,10 @@
               <h2>Team Gallery</h2>
             </div>
             <span class="muted">Click a team for roster details</span>
+          </div>
+
+          <div class="teams-spotlight-row">
+            <article class="feature-card spotlight-card" id="championSpotlight"></article>
           </div>
 
           <div class="team-grid" id="teamGrid"></div>
@@ -454,16 +477,37 @@
 
     <footer>
       <span>Zenni League 2026</span>
+      <button type="button" class="footer-link" data-mine-pick>★ My team</button>
       <span id="lastUpdated">Waiting for ESPN...</span>
     </footer>
   </div>
+
+  <dialog class="team-modal picker-modal" id="teamPicker" aria-label="Pick your team"></dialog>
+
+  <dialog class="team-modal share-modal" id="shareModal" aria-label="Share">
+    <button class="modal-close" type="button" onclick="this.closest('dialog').close()" aria-label="Close">×</button>
+    <div class="share-body">
+      <span class="section-kicker">📤 Share</span>
+      <h2 data-share-title>Share</h2>
+      <p class="share-loading" data-share-loading>Making your image…</p>
+      <img class="share-preview" data-share-preview alt="Preview of the image you are about to share" hidden>
+      <div class="share-actions" data-share-actions hidden>
+        <button type="button" class="share-btn is-primary" data-share-native hidden>Share…</button>
+        <a class="share-btn" data-share-download role="button">⬇ Download</a>
+        <button type="button" class="share-btn" data-share-copy-image hidden>Copy image</button>
+        <button type="button" class="share-btn" data-share-copy-link>Copy link</button>
+      </div>
+      <p class="share-status" data-share-status role="status" aria-live="polite"></p>
+    </div>
+  </dialog>
 
   <dialog class="team-modal" id="teamModal">
     <button class="modal-close" id="modalClose" type="button" aria-label="Close">×</button>
     <div id="teamModalContent"></div>
   </dialog>
 
+  <div class="live-toasts" id="liveToasts" aria-live="polite"></div>
+
   <script src="fantasy.js"></script>
 </body>
 </html>
- 
