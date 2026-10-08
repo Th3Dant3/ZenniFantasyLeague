@@ -6795,3 +6795,511 @@ tr.is-mine .standing-name strong { color: var(--gold-2); }
 
 /* Standings: league at a glance, above the conference tables */
 .standings-view .glance-ribbon { margin: 0 0 18px; }
+/* =========================================================
+   ZENNI OVERVIEW COMMAND CENTER V2 — approved visual direction
+   Scope: Overview only, except compact navigation treatment.
+   Does not modify scoring, Grades, API, or recap state machine.
+   ========================================================= */
+[data-view="overview"] .overview-command-v2 {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+  min-width: 0;
+}
+[data-view="overview"] .overview-command-v2 > [hidden],
+[data-view="overview"] .overview-command-v2 [hidden] { display: none !important; }
+[data-view="overview"] .overview-command-v2 .hero.hero-command {
+  position: relative;
+  isolation: isolate;
+  min-height: 305px;
+  max-height: none;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(245,183,40,.25);
+  border-radius: 22px;
+  background: #071421;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-backdrop {
+  position: absolute;
+  inset: 0;
+  background: url('overview-stadium.jpg') 62% 46% / cover no-repeat !important;
+  opacity: .64;
+  filter: saturate(.85);
+  transform: scale(1.025);
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg,#06101d 0%,rgba(6,16,29,.94) 27%,rgba(6,16,29,.52) 58%,rgba(6,16,29,.85) 100%) !important;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-copy {
+  position: relative;
+  z-index: 2;
+  width: 60%;
+  max-width: none;
+  padding: 36px clamp(22px,3.4vw,52px);
+}
+[data-view="overview"] .overview-command-v2 .hero-command .eyebrow {
+  color: var(--gold-2);
+  letter-spacing: .23em;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+[data-view="overview"] .overview-command-v2 .hero-command h1 {
+  max-width: none;
+  font: 800 clamp(60px,6vw,104px)/.85 "Barlow Condensed",Impact,sans-serif;
+  letter-spacing: -.025em;
+  margin: 0 0 10px;
+  white-space: nowrap;
+}
+[data-view="overview"] .overview-command-v2 .hero-command h1 span { color: var(--gold-2); }
+[data-view="overview"] .overview-hero-subtitle {
+  color: #e7f1fb;
+  font-weight: 800;
+  letter-spacing: .28em;
+  font-size: clamp(10px,1.1vw,15px);
+}
+[data-view="overview"] .overview-command-v2 .hero-command p {
+  margin: 13px 0 18px;
+  max-width: none;
+  color: #c5d4e6;
+  font-size: 13px;
+  letter-spacing: .035em;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta {
+  width: auto;
+  min-width: 185px;
+  min-height: 42px;
+  margin: 0 10px 0 0;
+  border-radius: 11px;
+  font-size: 12px;
+  background: linear-gradient(120deg,var(--gold-2),var(--gold));
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-recap-cta {
+  margin: 8px 0 0;
+  min-height: 42px;
+}
+[data-view="overview"] .overview-hero-truth {
+  margin-top: 14px;
+  color: #9ab0c7;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+[data-view="overview"] .overview-command-v2 .hero-poster { display: none !important; }
+[data-view="overview"] .overview-week-panel {
+  position: relative;
+  z-index: 3;
+  margin: 20px clamp(18px,3vw,42px) 20px auto;
+  width: clamp(230px,24%,325px);
+  padding: 23px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 17px;
+  background: rgba(5,15,28,.87);
+  box-shadow: 0 18px 45px rgba(0,0,0,.3);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+[data-view="overview"] .overview-week-kicker {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .16em;
+  color: var(--gold-2);
+}
+[data-view="overview"] .overview-week-panel > strong {
+  font: 800 clamp(36px,3.5vw,55px)/.95 "Barlow Condensed",sans-serif;
+}
+[data-view="overview"] .overview-week-status {
+  color: #b3c6d9;
+  font-size: 12px;
+}
+[data-view="overview"] .overview-week-panel button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  margin-top: 6px;
+  padding: 0 12px;
+  border: 1px solid rgba(245,183,40,.4);
+  border-radius: 9px;
+  background: rgba(245,183,40,.1);
+  color: var(--gold-2);
+  font-weight: 800;
+  cursor: pointer;
+}
+[data-view="overview"] .overview-feature-grid {
+  display: grid;
+  grid-template-columns: minmax(0,1.03fr) minmax(0,1.3fr) minmax(0,1.03fr);
+  gap: 15px;
+  align-items: stretch;
+}
+[data-view="overview"] .overview-feature-grid > * { min-width: 0; }
+[data-view="overview"] .overview-feature-grid .feature-card {
+  min-height: 0;
+  max-height: none;
+  height: auto;
+  padding: 18px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 17px;
+  background: linear-gradient(145deg,rgba(18,36,57,.96),rgba(9,23,39,.96));
+}
+[data-view="overview"] .overview-my-card { display: flex; flex-direction: column; gap: 13px; }
+[data-view="overview"] .overview-mini-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+[data-view="overview"] .overview-mini-heading button {
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  color: #65c9ff;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+[data-view="overview"] .overview-my-card .my-strip { flex: 1; }
+[data-view="overview"] .overview-my-card .mystrip-card {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-content: start;
+  gap: 12px;
+  height: 100%;
+  padding: 14px;
+  background: rgba(8,21,37,.64);
+  border-color: rgba(245,183,40,.20);
+}
+[data-view="overview"] .overview-my-card .mystrip-star { display: none; }
+[data-view="overview"] .overview-my-card .mystrip-vs {
+  font-size: 10px;
+  text-align: center;
+}
+[data-view="overview"] .overview-my-card .mystrip-team,
+[data-view="overview"] .overview-my-card .mystrip-team.is-opp {
+  flex-direction: row;
+  justify-content: flex-start;
+  text-align: left;
+}
+[data-view="overview"] .overview-my-card .mystrip-team.is-opp .mystrip-name.is-right { text-align: left; }
+[data-view="overview"] .overview-my-card .mystrip-name strong { font-size: 14px; }
+[data-view="overview"] .overview-my-card .mystrip-score { font-size: 26px; margin-left: auto; }
+[data-view="overview"] .overview-my-card .mystrip-meta { font-size: 10px; }
+[data-view="overview"] .overview-my-card .my-strip.is-prompt { min-height: 150px; }
+[data-view="overview"] .overview-feature-grid .command-motw-card,
+[data-view="overview"] .overview-feature-grid .standings-preview-card { min-height: 0; }
+[data-view="overview"] .overview-feature-grid .compact-heading h2 { font-size: 25px; }
+[data-view="overview"] .overview-feature-grid .featured-matchup { min-height: 145px; }
+[data-view="overview"] .overview-feature-grid .featured-team img { width: 68px; height: 68px; }
+[data-view="overview"] .overview-feature-grid .featured-team h3 { font-size: 19px; }
+[data-view="overview"] .overview-feature-grid .featured-score { font-size: 28px; }
+[data-view="overview"] .overview-feature-grid .standings-preview-row { min-height: 48px; }
+[data-view="overview"] .overview-feature-grid .standing-name strong { font-size: 11px; }
+[data-view="overview"] .overview-bottom-row { display: block; }
+[data-view="overview"] .overview-bottom-row > .matchup-board-card {
+  width: 100%;
+  min-height: 0;
+  max-height: none;
+  border-radius: 18px;
+  padding: 20px;
+}
+[data-view="overview"] .overview-bottom-row .overview-matchups-grid { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
+[data-view="overview"] .overview-shortcuts-title {
+  margin: 6px 2px 12px;
+  color: var(--gold-2);
+  font: 800 22px/1 "Barlow Condensed",sans-serif;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+[data-view="overview"] .overview-shortcut-grid { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 12px; }
+[data-view="overview"] .overview-shortcut {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  min-height: 164px;
+  padding: 17px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.13);
+  border-radius: 15px;
+  background: linear-gradient(145deg,rgba(24,48,76,.97),rgba(6,18,32,.97));
+  color: #f4f8ff;
+  text-align: left;
+  cursor: pointer;
+  transition: transform .18s ease,border-color .18s ease;
+}
+[data-view="overview"] .overview-shortcut:hover { transform: translateY(-3px); border-color: rgba(245,183,40,.7); }
+[data-view="overview"] .overview-shortcut:focus-visible,
+[data-view="overview"] .overview-week-panel button:focus-visible,
+[data-view="overview"] .overview-mini-heading button:focus-visible { outline: 3px solid #62c5ff; outline-offset: 3px; }
+[data-view="overview"] .overview-shortcut-art {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 6px;
+  border: 1px solid rgba(245,183,40,.30);
+  border-radius: 13px;
+  background: rgba(245,183,40,.11);
+  color: var(--gold-2);
+  font: 800 28px/1 "Barlow Condensed",sans-serif;
+}
+[data-view="overview"] .overview-shortcut strong { color: var(--gold-2); font: 800 20px/1 "Barlow Condensed",sans-serif; }
+[data-view="overview"] .overview-shortcut small { max-width: 94%; color: #a9bbcf; font-size: 11px; line-height: 1.35; }
+[data-view="overview"] .overview-shortcut b { position: absolute; right: 14px; bottom: 14px; color: var(--gold-2); }
+@media (max-width: 1250px) and (min-width: 761px) {
+  [data-view="overview"] .overview-feature-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  [data-view="overview"] .overview-feature-grid .standings-preview-card { grid-column: 1 / -1; }
+  [data-view="overview"] .overview-shortcut-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+}
+@media (max-width: 760px) {
+  .topbar { min-height: 62px; padding: 9px 15px; }
+  .topbar .brand-mark { width: 38px; height: 38px; }
+  .topbar .brand strong { font-size: 19px; }
+  .topbar .brand small { font-size: 8px; }
+  .mobile-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 7px; padding: 8px 13px 10px; scrollbar-width: none; scroll-snap-type: x proximity; }
+  .mobile-tabs::-webkit-scrollbar { display: none; }
+  .mobile-tabs .mobile-tab { flex: 0 0 auto; min-width: 66px; min-height: 40px; padding: 8px 13px; border-radius: 12px; scroll-snap-align: start; font-size: 11px; }
+  [data-view="overview"] .overview-command-v2 { gap: 12px; margin-top: 10px; }
+  [data-view="overview"] .overview-command-v2 .hero.hero-command { min-height: 225px; display: block; border-radius: 17px; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-backdrop { background-position: center 24% !important; opacity: .35; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-overlay { background: linear-gradient(90deg,rgba(5,14,26,.97),rgba(5,14,26,.76) 72%,rgba(5,14,26,.64)) !important; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-copy { width: 100%; padding: 19px 18px 8px; }
+  [data-view="overview"] .overview-command-v2 .hero-command h1 { font-size: clamp(53px,13vw,72px); }
+  [data-view="overview"] .overview-command-v2 .hero-command .eyebrow { font-size: 9px; margin-bottom: 9px; }
+  [data-view="overview"] .overview-hero-subtitle { font-size: 9px; letter-spacing: .18em; }
+  [data-view="overview"] .overview-command-v2 .hero-command p { font-size: 11px; margin: 10px 0; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta { min-height: 39px; min-width: 142px; font-size: 11px; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-recap-cta { min-height: 39px; font-size: 10px; }
+  [data-view="overview"] .overview-hero-truth { font-size: 8px; margin-top: 9px; }
+  [data-view="overview"] .overview-week-panel { width: auto; margin: 6px 15px 14px; padding: 11px 13px; display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; }
+  [data-view="overview"] .overview-week-kicker { font-size: 9px; }
+  [data-view="overview"] .overview-week-panel > strong { grid-row: 1 / 3; grid-column: 2; font-size: 30px; }
+  [data-view="overview"] .overview-week-status { font-size: 10px; }
+  [data-view="overview"] .overview-week-panel button { grid-column: 1 / -1; min-height: 35px; margin-top: 6px; font-size: 11px; }
+  [data-view="overview"] .overview-feature-grid { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  [data-view="overview"] .overview-feature-grid .feature-card { padding: 15px; }
+  [data-view="overview"] .overview-feature-grid .featured-matchup { min-height: 130px; }
+  [data-view="overview"] .overview-bottom-row .overview-matchups-grid { grid-template-columns: 1fr; }
+  [data-view="overview"] .overview-shortcut-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+  [data-view="overview"] .overview-shortcut { min-height: 148px; padding: 13px; }
+  [data-view="overview"] .overview-shortcut strong { font-size: 19px; }
+  [data-view="overview"] .overview-shortcut small { font-size: 10px; }
+  [data-view="overview"] .overview-shortcut-art { width: 45px; height: 45px; font-size: 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-view="overview"] .overview-shortcut { transition: none; }
+  [data-view="overview"] .overview-shortcut:hover { transform: none; }
+}
+/* Respect the user's "Not now" choice: never leave an empty My Team card. */
+[data-view="overview"] .overview-my-card:has(#myTeamStrip[hidden]) { display: none; }
+
+
+/* ============================================================
+   ZENNI OVERVIEW COMMAND CENTER V3 — APPROVED LAYOUT ONLY
+   No rules outside [data-view="overview"] except reduced motion.
+   Preserve ESPN truth, week switching, all six stories and sharing.
+   ============================================================ */
+[data-view="overview"] .overview-command-v2 { gap: 14px; margin-top: 12px; }
+[data-view="overview"] .overview-command-v2 .hero.hero-command {
+  display: flex; min-height: 288px; border-color: rgba(255,195,56,.34);
+  box-shadow: inset 0 0 80px rgba(2,8,18,.20);
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-backdrop {
+  opacity: .87; background-position: 57% 42% !important;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-overlay {
+  background: linear-gradient(90deg,rgba(3,12,25,.96) 0%,rgba(3,12,25,.77) 31%,rgba(3,12,25,.16) 61%,rgba(3,12,25,.76) 100%) !important;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-copy { width: 60%; padding-block: 28px; }
+[data-view="overview"] .overview-feature-grid { align-items: stretch; }
+[data-view="overview"] .overview-feature-grid .feature-card { padding: 17px; }
+[data-view="overview"] .overview-my-card { min-height: 280px; }
+[data-view="overview"] .overview-my-card .my-strip { flex: none; }
+[data-view="overview"] .overview-my-card .mystrip-card {
+  height: auto; min-height: 0; gap: 8px; padding: 12px;
+}
+[data-view="overview"] .overview-my-card .mystrip-team { min-height: 49px; }
+[data-view="overview"] .overview-my-card .mystrip-score { font-size: 24px; }
+[data-view="overview"] .overview-feature-grid .featured-matchup { min-height: 132px; }
+[data-view="overview"] .overview-feature-grid .standings-preview-row { min-height: 43px; }
+[data-view="overview"] .overview-feature-grid .standings-preview-card { overflow: hidden; }
+
+/* A compact recap, not a full-screen replacement for the main dashboard. */
+[data-view="overview"] #weekRecap { min-width: 0; margin: 0; gap: 10px; }
+[data-view="overview"] #weekRecap .recap-hero { grid-template-columns: minmax(0,1.25fr) minmax(0,1fr); gap: 12px; }
+[data-view="overview"] #weekRecap .recap-card { border-radius: 15px; }
+[data-view="overview"] #weekRecap .recap-intro,
+[data-view="overview"] #weekRecap .recap-totw { min-height: 0; padding: 16px 19px; }
+[data-view="overview"] #weekRecap .recap-intro h2 { margin: 6px 0 7px; font-size: clamp(36px,3.3vw,52px); line-height: .9; }
+[data-view="overview"] #weekRecap .recap-intro p { font-size: 12px; line-height: 1.38; }
+[data-view="overview"] #weekRecap .recap-intro-footer { margin-top: 10px; gap: 9px 14px; }
+[data-view="overview"] #weekRecap .recap-cd b { font-size: 21px; }
+[data-view="overview"] #weekRecap .recap-countdown { padding: 7px 10px; }
+[data-view="overview"] #weekRecap .recap-share-actions { gap: 6px; }
+[data-view="overview"] #weekRecap .recap-share-btn { min-height: 35px; padding: 7px 11px; font-size: 10px; }
+[data-view="overview"] #weekRecap .recap-totw h3 { font-size: 27px; }
+[data-view="overview"] #weekRecap .recap-totw-score { font-size: clamp(48px,4.4vw,68px); }
+[data-view="overview"] #weekRecap .recap-pills { gap: 5px; }
+[data-view="overview"] #weekRecap .recap-pill { font-size: 9px; padding: 5px 8px; }
+[data-view="overview"] #weekRecap .recap-stories {
+  display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 10px;
+}
+[data-view="overview"] #weekRecap .recap-story { min-height: 134px; padding: 13px; gap: 5px; }
+[data-view="overview"] #weekRecap .recap-story-icon { font-size: 21px; }
+[data-view="overview"] #weekRecap .recap-story-label { font-size: 9px; letter-spacing: .08em; }
+[data-view="overview"] #weekRecap .recap-story h3 { font-size: 21px; }
+[data-view="overview"] #weekRecap .recap-story p { font-size: 11px; line-height: 1.3; }
+[data-view="overview"] #weekRecap .recap-big { font-size: 20px; }
+[data-view="overview"] .recap-results-disclosure { min-width: 0; }
+[data-view="overview"] .recap-results-disclosure > summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  cursor: pointer; list-style: none; min-height: 43px; padding: 11px 16px;
+  border: 1px solid rgba(255,195,56,.30); border-radius: 12px;
+  color: #ffce53; background: rgba(12,28,46,.96); font-size: 12px; font-weight: 800;
+}
+[data-view="overview"] .recap-results-disclosure > summary::-webkit-details-marker { display: none; }
+[data-view="overview"] .recap-results-disclosure > summary > span:last-child { color: #9eb2c8; font-size: 11px; font-weight: 600; }
+[data-view="overview"] .recap-results-disclosure[open] > summary { border-radius: 12px 12px 0 0; }
+[data-view="overview"] .recap-results-disclosure > .recap-results { border-radius: 0 0 12px 12px !important; }
+[data-view="overview"] .recap-results-disclosure > summary:focus-visible { outline: 3px solid #62c5ff; outline-offset: 3px; }
+
+/* Image-backed shortcuts use only the bundled stadium art; no fake teams/players. */
+[data-view="overview"] .overview-shortcut { isolation: isolate; justify-content: flex-end; min-height: 174px; padding: 14px; }
+[data-view="overview"] .overview-shortcut::before {
+  content: ''; position: absolute; inset: 0; z-index: -2;
+  background: url('overview-stadium.jpg') center / cover no-repeat;
+  opacity: .62; transition: transform .22s ease;
+}
+[data-view="overview"] .overview-shortcut::after {
+  content: ''; position: absolute; inset: 0; z-index: -1;
+  background: linear-gradient(0deg,rgba(3,11,23,.98) 0%,rgba(3,11,23,.66) 53%,rgba(3,11,23,.13) 100%);
+}
+[data-view="overview"] .overview-shortcut:nth-child(1)::before { background-position: 30% 30%; }
+[data-view="overview"] .overview-shortcut:nth-child(2)::before { background-position: 47% 22%; filter: hue-rotate(10deg); }
+[data-view="overview"] .overview-shortcut:nth-child(3)::before { background-position: 64% 36%; filter: sepia(.3); }
+[data-view="overview"] .overview-shortcut:nth-child(4)::before { background-position: 75% 30%; filter: saturate(.5); }
+[data-view="overview"] .overview-shortcut:nth-child(5)::before { background-position: 55% 67%; filter: hue-rotate(180deg); }
+[data-view="overview"] .overview-shortcut:nth-child(6)::before { background-position: 91% 42%; filter: saturate(1.25); }
+[data-view="overview"] .overview-shortcut:hover::before { transform: scale(1.06); }
+[data-view="overview"] .overview-shortcut-art { width: 37px; height: 37px; font-size: 20px; margin: 0; }
+[data-view="overview"] .overview-shortcut strong { font-size: 21px; text-shadow: 0 2px 10px #000; }
+[data-view="overview"] .overview-shortcut small { font-size: 11px; text-shadow: 0 2px 8px #000; }
+
+@media (max-width: 1250px) and (min-width: 761px) {
+  [data-view="overview"] #weekRecap .recap-stories { grid-template-columns: repeat(3,minmax(0,1fr)); }
+}
+@media (max-width: 760px) {
+  /* Hero is stacked on phones: week panel must never collide with league title. */
+  [data-view="overview"] .overview-command-v2 .hero.hero-command { display: block; min-height: 0; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-copy { width: 100%; }
+  [data-view="overview"] .overview-command-v2 .hero-command h1 { white-space: normal; }
+  [data-view="overview"] .overview-week-panel { width: auto; margin: 0 14px 14px; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-backdrop { opacity: .65; background-position: 59% 20% !important; }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-copy { width: 100%; padding: 18px 15px 5px; }
+  [data-view="overview"] .overview-command-v2 .hero-command h1 { font-size: clamp(49px,12.5vw,70px); }
+  [data-view="overview"] .overview-week-panel { margin-top: 4px; }
+  [data-view="overview"] .overview-feature-grid .feature-card { padding: 13px; }
+  [data-view="overview"] .overview-my-card { min-height: 0; }
+  [data-view="overview"] #weekRecap .recap-hero { grid-template-columns: 1fr; gap: 9px; }
+  [data-view="overview"] #weekRecap .recap-intro,
+  [data-view="overview"] #weekRecap .recap-totw { padding: 14px; }
+  [data-view="overview"] #weekRecap .recap-intro h2 { font-size: 42px; }
+  [data-view="overview"] #weekRecap .recap-totw-score { font-size: 54px; }
+  [data-view="overview"] #weekRecap .recap-stories {
+    display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 9px;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  [data-view="overview"] #weekRecap .recap-story {
+    flex: 0 0 82%; min-height: 165px; padding: 14px;
+    justify-content: flex-start; scroll-snap-align: center;
+  }
+  [data-view="overview"] #weekRecap .recap-story h3 { font-size: 26px; }
+  [data-view="overview"] #weekRecap .recap-story p { font-size: 12px; }
+  [data-view="overview"] .overview-shortcut { min-height: 134px; padding: 12px; }
+  [data-view="overview"] .overview-shortcut strong { font-size: 19px; }
+  [data-view="overview"] .overview-shortcut small { font-size: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-view="overview"] .overview-shortcut::before { transition: none; }
+}
+
+/* ===========================================================
+   OVERVIEW V3.1 — APPROVED FIVE-POINT VISUAL POLISH
+   Scope intentionally restricted to the Overview view.
+   =========================================================== */
+/* 1. Stadium atmosphere across the full hero; photo at natural
+   scale, feathered to avoid an oversized cropped helmet. */
+[data-view="overview"] .overview-command-v2 .hero-command .hero-backdrop {
+  background: url('overview-arena.svg') center center / cover no-repeat !important;
+  opacity: 1 !important; filter: none !important; transform: none !important;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .overview-hero-player {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background: url('overview-stadium.jpg') 62% 49% / auto 100% no-repeat;
+  opacity: .92;
+  -webkit-mask-image: radial-gradient(ellipse 32% 100% at 61% 50%, #000 35%, transparent 100%);
+  mask-image: radial-gradient(ellipse 32% 100% at 61% 50%, #000 35%, transparent 100%);
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-overlay {
+  z-index: 1;
+  background: linear-gradient(90deg,rgba(3,11,22,.96) 0%,rgba(3,11,22,.82) 29%,rgba(3,11,22,.07) 56%,rgba(3,11,22,.73) 100%) !important;
+}
+/* 2. Explicit contrast for all yellow hero CTA states. */
+[data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta,
+[data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta span,
+[data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta strong {
+  color: #081323 !important;
+  text-shadow: none !important;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta {
+  border-color: #ffd45d;
+  background: linear-gradient(120deg,#ffe083,#f4b91d) !important;
+  font-weight: 900;
+}
+[data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta:hover { background: #ffe18c !important; }
+[data-view="overview"] .overview-command-v2 .hero-command .hero-battle-cta:focus-visible { outline: 3px solid #70d7ff; outline-offset: 3px; }
+/* 3. My Team should never stretch its interior to fill standings. */
+[data-view="overview"] .overview-feature-grid { align-items: start; }
+[data-view="overview"] .overview-my-card { min-height: 0 !important; height: auto; align-self: start; }
+[data-view="overview"] .overview-my-card .my-strip { flex: 0 0 auto; }
+[data-view="overview"] .overview-my-card .mystrip-card { height: auto !important; min-height: 0 !important; }
+/* 4. Pregame scoring is displayed as an em dash, with an explicit status.
+   Only presentation changes; ESPN values in state are never rewritten. */
+[data-view="overview"] .overview-matchup-card .overview-matchup-footer > span:last-child {
+  font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+}
+[data-view="overview"] .overview-feature-grid #featuredMatchup[data-game-status="SCHEDULED"] .featured-score,
+[data-view="overview"] .overview-feature-grid #featuredMatchup[data-game-status="PRE"] .featured-score {
+  color: #a8bdd2;
+}
+/* 5. Six individually illustrated navigation scenes, not one repeated photo. */
+[data-view="overview"] .overview-shortcut::before {
+  background-image: var(--shortcut-art) !important;
+  background-position: center center !important;
+  background-size: cover !important;
+  opacity: .95;
+  filter: none !important;
+}
+[data-view="overview"] .overview-shortcut-battle { --shortcut-art: url('overview-tile-battle.svg'); }
+[data-view="overview"] .overview-shortcut-grades { --shortcut-art: url('overview-tile-grades.svg'); }
+[data-view="overview"] .overview-shortcut-awards { --shortcut-art: url('overview-tile-awards.svg'); }
+[data-view="overview"] .overview-shortcut-standings { --shortcut-art: url('overview-tile-standings.svg'); }
+[data-view="overview"] .overview-shortcut-teams { --shortcut-art: url('overview-tile-teams.svg'); }
+[data-view="overview"] .overview-shortcut-draft { --shortcut-art: url('overview-tile-draft.svg'); }
+[data-view="overview"] .overview-shortcut::after {
+  background: linear-gradient(0deg,rgba(2,10,21,.99) 0%,rgba(2,10,21,.70) 38%,rgba(2,10,21,.04) 100%);
+}
+@media (max-width:760px) {
+  [data-view="overview"] .overview-command-v2 .hero-command .overview-hero-player {
+    background-size: auto 75%; background-position: 75% 5%; opacity: .47;
+    -webkit-mask-image: linear-gradient(to bottom,#000 5%,transparent 80%);
+    mask-image: linear-gradient(to bottom,#000 5%,transparent 80%);
+  }
+  [data-view="overview"] .overview-command-v2 .hero-command .hero-overlay {
+    background: linear-gradient(180deg,rgba(3,11,22,.78) 0%,rgba(3,11,22,.9) 45%,rgba(3,11,22,.95) 100%) !important;
+  }
+  [data-view="overview"] .overview-my-card { align-self: stretch; }
+}

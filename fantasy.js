@@ -482,7 +482,8 @@ function syncRecapState_() {
   }
 
   section.hidden = false;
-  if (hero) hero.hidden = true;
+  // Overview V3: recap is a secondary section, never a replacement for the hero.
+  if (hero) hero.hidden = false;
 
   // Two clearly labelled halves: last week's recap, then this week's board.
   if (weekLabel) {
@@ -865,10 +866,13 @@ function renderWeekRecap_() {
     <div class="recap-stories" data-recap-stories>${storyHtml}</div>
     <p class="recap-swipe-hint">Tap a story or swipe for the next one</p>
 
-    <article class="recap-card recap-results" style="--i:8">
-      <div class="recap-results-head"><span class="section-kicker">All results</span><span>Week ${week} · ${recap.complete ? 'Final' : 'Provisional'}</span></div>
-      <div class="recap-results-grid">${resultsHtml}</div>
-    </article>`;
+    <details class="recap-results-disclosure">
+      <summary><span>All Week ${week} results</span><span>${recap.results.length} games · ${recap.complete ? 'Final' : 'Provisional'} <span aria-hidden="true">⌄</span></span></summary>
+      <article class="recap-card recap-results" style="--i:8">
+        <div class="recap-results-head"><span class="section-kicker">All results</span><span>Week ${week} · ${recap.complete ? 'Final' : 'Provisional'}</span></div>
+        <div class="recap-results-grid">${resultsHtml}</div>
+      </article>
+    </details>`;
 
   const close = section.querySelector('[data-recap-close]');
   if (close) {
@@ -1434,11 +1438,11 @@ function renderMyTeamStrip_() {
       <div class="mystrip-team is-me" data-side="${iAmHome ? 'home' : 'away'}">
         ${recapLogo_(team, 'mystrip-logo')}
         <div class="mystrip-name"><strong>${escapeHtml(team ? team.name : 'My team')}</strong><span>My team · Week ${current}</span></div>
-        <b class="mystrip-score">${number2(iAmHome ? match.homeScore : match.awayScore)}</b>
+        <b class="mystrip-score">${overviewScoreLabel_(iAmHome ? match.homeScore : match.awayScore, status)}</b>
       </div>
       <span class="mystrip-vs">VS</span>
       <div class="mystrip-team is-opp" data-side="${iAmHome ? 'away' : 'home'}">
-        <b class="mystrip-score">${number2(iAmHome ? match.awayScore : match.homeScore)}</b>
+        <b class="mystrip-score">${overviewScoreLabel_(iAmHome ? match.awayScore : match.homeScore, status)}</b>
         <div class="mystrip-name is-right"><strong>${escapeHtml(opponent ? opponent.name : 'Opponent')}</strong><span>${escapeHtml(recapRecordText_(opponent))}</span></div>
         ${recapLogo_(opponent, 'mystrip-logo')}
       </div>
@@ -2947,6 +2951,7 @@ function hydrateState(data, options = {}) {
   document.getElementById('heroWeek').textContent = state.league.currentWeek;
   document.getElementById('heroTeams').textContent = state.league.teamCount;
   document.getElementById('heroPlayoffs').textContent = state.league.playoffTeams;
+  updateOverviewWeekStatus_();
 
   const generated = data.generatedAt ? new Date(data.generatedAt) : new Date();
   document.getElementById('lastUpdated').textContent =
@@ -2958,8 +2963,20 @@ function hydrateState(data, options = {}) {
     : `Through Week ${state.league.latestScoringPeriod}`;
 
   document.getElementById('heroSubtext').textContent = preseason
-    ? 'The field is set. Twelve teams. One Zenni Cup.'
+    ? 'The field is set. Twelve teams. One championship belt.'
     : `Live through Week ${state.league.latestScoringPeriod}.`;
+}
+
+function updateOverviewWeekStatus_() {
+  // Status is a description of the current fantasy matchup period only.
+  const weekStatus = document.getElementById('heroWeekStatus');
+  if (!weekStatus) return;
+  const matches = Array.isArray(state.currentMatchups) ? state.currentMatchups : [];
+  const statuses = matches.map(match => String(match && match.status || '').toUpperCase());
+  weekStatus.textContent = !statuses.length ? 'Awaiting matchup data' :
+    statuses.every(value => value === 'FINAL') ? 'All matchups final' :
+    statuses.some(value => value === 'LIVE') ? 'Matchups in progress' :
+    statuses.every(value => value === 'SCHEDULED') ? 'Upcoming matchups' : 'Matchup week active';
 }
 
 function hydrateDraftState(data) {
@@ -3303,6 +3320,7 @@ function renderAll(options = {}) {
 function renderWeek(matchups, week) {
   state.selectedWeek = Number(week);
   syncWeekLabels(week);
+  if (Number(week) === Number(state.league && state.league.currentWeek)) updateOverviewWeekStatus_();
   renderOverviewMatchups(matchups, week);
   renderFeaturedMatchup(matchups, week);
   renderBattleCenter(matchups, week);
@@ -3992,12 +4010,13 @@ function renderFeaturedMatchup(matchups, week) {
   `;
 
   container.innerHTML = `
-    ${featuredTeamMarkup(home, featured.homeScore, 'left')}
+    ${featuredTeamMarkup(home, featured.homeScore, 'left', featured.status)}
     <div class="vs-mark">VS</div>
-    ${featuredTeamMarkup(away, featured.awayScore, 'right')}
+    ${featuredTeamMarkup(away, featured.awayScore, 'right', featured.status)}
   `;
 
   container.dataset.matchupKey = battleMatchupKey_(featured, week);
+  container.dataset.gameStatus = String(featured.status || 'SCHEDULED').toUpperCase();
 }
 
 function chooseFeaturedMatchup(matchups, week) {
@@ -4264,7 +4283,7 @@ function safeRank_(standing) {
     : 999;
 }
 
-function featuredTeamMarkup(team, score, side) {
+function featuredTeamMarkup(team, score, side, status) {
   if (!team) return '<div class="featured-team"><h3>Unknown Team</h3></div>';
 
   return `
@@ -4272,7 +4291,7 @@ function featuredTeamMarkup(team, score, side) {
       <img class="featured-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team.name)} mascot" ${teamIconFallbackAttr(team)}>
       <h3>${escapeHtml(team.name)}</h3>
       <p>${escapeHtml(ownerText(team))}</p>
-      <div class="featured-score">${number2(score)}</div>
+      <div class="featured-score">${overviewScoreLabel_(score, status)}</div>
     </div>
   `;
 }
@@ -4815,6 +4834,7 @@ async function refreshCurrentWeekMatchups_(render = true) {
 
     if (matchups.length) {
       state.currentMatchups = matchups;
+      updateOverviewWeekStatus_();
       state.matchupsResolved = true;
       state.weekCache.set(currentWeek, matchups);
       saveMatchupsBrowserCache_(currentWeek, matchups);
@@ -4856,6 +4876,15 @@ function renderWeekError(error, week) {
   syncWeekLabels(week);
 }
 
+// Overview display only. Scheduled scores remain untouched in ESPN state.
+function overviewScoreLabel_(score, status) {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'SCHEDULED' || normalized === 'PRE' || normalized === 'UPCOMING' || normalized === 'NOT_STARTED') {
+    return '—';
+  }
+  return number2(score);
+}
+
 function renderOverviewMatchups(matchups, week) {
   const grid = document.getElementById('overviewMatchups');
 
@@ -4881,9 +4910,9 @@ function renderOverviewMatchups(matchups, week) {
         aria-label="Open FantasyCast for ${escapeAttr(home ? home.name : 'Home')} versus ${escapeAttr(away ? away.name : 'Away')}"
       >
         <div class="overview-matchup-teams">
-          ${overviewMatchupTeamMarkup(home, match.homeScore, 'home')}
+          ${overviewMatchupTeamMarkup(home, match.homeScore, 'home', match.status)}
           <div class="overview-versus">VS</div>
-          ${overviewMatchupTeamMarkup(away, match.awayScore, 'away')}
+          ${overviewMatchupTeamMarkup(away, match.awayScore, 'away', match.status)}
         </div>
         <div class="overview-matchup-footer">
           <span>${escapeHtml(story.tag)}</span>
@@ -4896,7 +4925,7 @@ function renderOverviewMatchups(matchups, week) {
   bindOverviewFantasyCastCards_(grid);
 }
 
-function overviewMatchupTeamMarkup(team, score, side) {
+function overviewMatchupTeamMarkup(team, score, side, status) {
   return `
     <div class="overview-matchup-team overview-matchup-${side}">
       <img class="matchup-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
@@ -4904,7 +4933,7 @@ function overviewMatchupTeamMarkup(team, score, side) {
         <div class="matchup-team-name">${escapeHtml(team ? team.name : 'Unknown Team')}</div>
         <div class="matchup-owner">${escapeHtml(team ? ownerText(team) : '')}</div>
       </div>
-      <div class="matchup-score">${number2(score)}</div>
+      <div class="matchup-score">${overviewScoreLabel_(score, status)}</div>
     </div>
   `;
 }

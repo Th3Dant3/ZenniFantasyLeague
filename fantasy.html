@@ -116,22 +116,20 @@
 
     <main id="top">
       <section class="view-panel is-active" data-view="overview">
-        <section class="overview-command-layout">
-          <section class="my-strip" id="myTeamStrip" hidden aria-label="My team"></section>
-
-          <section class="week-recap" id="weekRecap" hidden aria-label="Weekly recap" aria-live="polite"></section>
-
+        <section class="overview-command-layout overview-command-v2">
           <section class="hero hero-command" id="overviewHero">
             <div class="hero-backdrop" aria-hidden="true"></div>
+            <div class="overview-hero-player" aria-hidden="true"></div>
             <div class="hero-overlay" aria-hidden="true"></div>
 
             <div class="hero-copy">
-              <div class="eyebrow">2026 Fantasy Football</div>
-              <h1>ROAD TO THE<br><span>ZENNI CUP</span></h1>
-              <p id="heroSubtext">The field is set. Twelve teams. One Zenni Cup.</p>
+              <div class="eyebrow">Welcome to the league</div>
+              <h1>ZENNI <span>LEAGUE</span></h1>
+              <div class="overview-hero-subtitle">FANTASY FOOTBALL 2026</div>
+              <p id="heroSubtext">Twelve teams. One championship belt.</p>
 
               <button class="hero-battle-cta" type="button" data-tab-open="battle">
-                <span>Enter Battle Center</span>
+                <span>View this week</span>
                 <strong>→</strong>
               </button>
 
@@ -140,33 +138,26 @@
                 <strong>→</strong>
               </button>
 
-              <div class="hero-stats">
-                <div class="hero-stat-card">
-                  <span class="hero-stat-icon">▣</span>
-                  <span class="stat-value" id="heroWeek">1</span>
-                  <span class="stat-label">Current Week</span>
-                </div>
-                <div class="hero-stat-card">
-                  <span class="hero-stat-icon">♟</span>
-                  <span class="stat-value" id="heroTeams">12</span>
-                  <span class="stat-label">Teams</span>
-                </div>
-                <div class="hero-stat-card">
-                  <span class="hero-stat-icon">🏆</span>
-                  <span class="stat-value" id="heroPlayoffs">8</span>
-                  <span class="stat-label">Playoff Spots</span>
-                </div>
-              </div>
+              <div class="overview-hero-truth">ESPN league data · Eastern Time</div>
             </div>
 
+            <aside class="overview-week-panel" aria-label="Current fantasy week">
+              <span class="overview-week-kicker">Current matchup period</span>
+              <strong>WEEK <span id="heroWeek">1</span></strong>
+              <span id="heroWeekStatus" class="overview-week-status">Checking ESPN status…</span>
+              <button type="button" data-tab-open="battle">Open Battle Center <span aria-hidden="true">→</span></button>
+            </aside>
+            <div class="hero-stats" hidden aria-hidden="true"><span id="heroTeams">12</span><span id="heroPlayoffs">8</span></div>
             <div class="hero-poster hero-poster-command">
               <img src="zenni-league-2026.png" alt="Zenni League 2026 championship poster">
             </div>
           </section>
 
-          <div class="overview-section-label" id="thisWeekLabel" hidden><span>This week</span></div>
-
-          <div class="overview-bottom-row">
+          <div class="overview-feature-grid">
+          <article class="overview-my-card feature-card" aria-label="My team and matchup">
+            <div class="overview-mini-heading"><span class="section-kicker">My Team</span><button type="button" data-tab-open="teams">View Teams →</button></div>
+            <section class="my-strip" id="myTeamStrip" hidden aria-label="My team"></section>
+          </article>
             <article class="feature-card game-card command-motw-card">
               <div class="section-heading compact-heading">
                 <div>
@@ -186,6 +177,21 @@
               </button>
             </article>
 
+            <article class="feature-card standings-preview-card">
+              <div class="section-heading compact-heading">
+                <div>
+                  <span class="section-kicker">Standings Preview</span>
+                  <h2>Race Snapshot</h2>
+                </div>
+                <button class="panel-link" type="button" data-tab-open="standings">View All →</button>
+              </div>
+              <div id="standingsPreview" class="standings-preview-list"></div>
+            </article>
+          </div>
+          <!-- Recap is secondary to the current-week command cards, even when FINAL. -->
+          <section class="week-recap" id="weekRecap" hidden aria-label="Weekly recap" aria-live="polite"></section>
+          <div class="overview-section-label" id="thisWeekLabel" hidden><span>This week</span></div>
+          <div class="overview-bottom-row">
             <article class="feature-card matchup-board-card">
               <div class="section-heading compact-heading">
                 <div>
@@ -205,18 +211,18 @@
               </button>
             </article>
 
-            <article class="feature-card standings-preview-card">
-              <div class="section-heading compact-heading">
-                <div>
-                  <span class="section-kicker">Standings Preview</span>
-                  <h2>Race Snapshot</h2>
-                </div>
-                <button class="panel-link" type="button" data-tab-open="standings">View All →</button>
-              </div>
-              <div id="standingsPreview" class="standings-preview-list"></div>
-            </article>
           </div>
-
+          <section class="overview-shortcuts" aria-label="Explore Zenni League">
+            <h2 class="overview-shortcuts-title">Explore the league</h2>
+            <div class="overview-shortcut-grid">
+              <button type="button" data-tab-open="battle" class="overview-shortcut overview-shortcut-battle"><span class="overview-shortcut-art">⚔</span><strong>Battle Center</strong><small>Matchups and FantasyCast</small><b aria-hidden="true">↗</b></button>
+              <button type="button" data-tab-open="grades" class="overview-shortcut overview-shortcut-grades"><span class="overview-shortcut-art">A+</span><strong>Grades</strong><small>Weekly team report cards</small><b aria-hidden="true">↗</b></button>
+              <button type="button" data-tab-open="awards" class="overview-shortcut overview-shortcut-awards"><span class="overview-shortcut-art">★</span><strong>Weekly Awards</strong><small>Top performers and honors</small><b aria-hidden="true">↗</b></button>
+              <button type="button" data-tab-open="standings" class="overview-shortcut overview-shortcut-standings"><span class="overview-shortcut-art">▥</span><strong>Standings</strong><small>League rankings</small><b aria-hidden="true">↗</b></button>
+              <button type="button" data-tab-open="teams" class="overview-shortcut overview-shortcut-teams"><span class="overview-shortcut-art">◈</span><strong>Teams</strong><small>Rosters and team details</small><b aria-hidden="true">↗</b></button>
+              <button type="button" data-tab-open="draft" class="overview-shortcut overview-shortcut-draft"><span class="overview-shortcut-art">#1</span><strong>Draft Day</strong><small>Draft results and board</small><b aria-hidden="true">↗</b></button>
+            </div>
+          </section>
         </section>
       </section>
 
