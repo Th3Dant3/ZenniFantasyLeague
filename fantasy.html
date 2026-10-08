@@ -319,19 +319,30 @@
       </section>
 
       <section class="view-panel grades-view" data-view="grades">
-        <section class="feature-card team-grades-section team-grades-tab-section">
-          <div class="section-heading compact-heading team-grades-heading">
-            <div>
-              <span class="section-kicker">Weekly Report Card</span>
-              <h2>Team Grades</h2>
-              <p>Grades reward scoring, beating projection, matchup performance and lineup decisions — not just wins and losses.</p>
+        <section class="zenni-grades-shell" aria-label="Weekly team grades">
+          <header class="zg-hero">
+            <div class="zg-hero-copy">
+              <span class="zg-eyebrow">TEAM GRADES · WEEKLY REPORT CARD</span>
+              <h2>HOW EVERY TEAM <em>PERFORMED</em></h2>
+              <p>Weekly grades based on ESPN scores, projections, matchup results, and lineup efficiency.</p>
+              <div class="grades-week-control">
+                <span class="performers-week" id="teamGradesWeekLabel">Week 1</span>
+                <div class="grades-week-tabs" id="gradesWeekTabs" aria-label="Select grades week"></div>
+              </div>
             </div>
-            <div class="grades-week-control">
-              <span class="performers-week" id="teamGradesWeekLabel">Week 1</span>
-              <div class="grades-week-tabs" id="gradesWeekTabs" aria-label="Select grades week"></div>
+            <div class="zg-hero-art" aria-hidden="true"><div class="zg-report-sheet"><small>ZENNI LEAGUE · 2026</small><b>WEEKLY REPORT</b><strong>A+</strong><span>SCORING · PROJECTION</span><span>RESULT · LINEUP</span><span>ESPN-BASED GRADES ✓</span></div></div>
+          </header>
+          <div id="gradesSummary" class="zg-summary" aria-live="polite"></div>
+          <div class="zg-toolbar">
+            <div class="zg-modes" id="gradesViewControls" role="group" aria-label="Grades display mode">
+              <button type="button" data-grade-mode="board" class="is-active" aria-pressed="true">Grade Board</button>
+              <button type="button" data-grade-mode="list" aria-pressed="false">Team List</button>
+              <button type="button" data-grade-mode="cards" aria-pressed="false">Grade Cards</button>
             </div>
+            <span class="zg-formula-label">45% Projection · 30% Rank · 15% Result · 10% Lineup</span>
           </div>
-          <div id="weeklyTeamGrades" class="team-grades-wrap skeleton-block"></div>
+          <div id="weeklyTeamGrades" class="team-grades-wrap skeleton-block" aria-live="polite"></div>
+          <section id="gradesDetail" class="zg-detail" aria-label="Selected team grade breakdown"></section>
         </section>
       </section>
 

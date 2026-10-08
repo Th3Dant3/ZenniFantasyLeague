@@ -147,6 +147,10 @@ const state = {
   topPerformerPosition: 'ALL',
   awardsWeek: 1,
   gradesWeek: 1,
+  gradesViewMode: 'board',
+  gradesSelectedTeamId: null,
+  gradesReports: [],
+  gradesWeekComplete: false,
   awardsPerformerPosition: 'ALL',
   allTimePerformerPosition: 'ALL',
   allTimePerformanceCache: null,
@@ -2884,6 +2888,25 @@ function bindUi() {
     changeGradesWeek_(Number(button.dataset.gradesWeek || 1));
   });
 
+  document.getElementById('gradesViewControls')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-grade-mode]');
+    if (!button) return;
+    const mode = button.dataset.gradeMode;
+    if (!['board', 'list', 'cards'].includes(mode)) return;
+    state.gradesViewMode = mode;
+    renderGradesPresentation_();
+  });
+  document.getElementById('weeklyTeamGrades')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-grade-team]');
+    if (!button) return;
+    state.gradesSelectedTeamId = Number(button.dataset.gradeTeam);
+    renderGradesPresentation_();
+    const detail = document.getElementById('gradesDetail');
+    if (detail && window.matchMedia('(max-width: 760px)').matches) {
+      detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  });
+
   const modal = document.getElementById('teamModal');
   document.getElementById('modalClose').addEventListener('click', () => modal.close());
 
@@ -4459,6 +4482,11 @@ async function changeGradesWeek_(week, force = false) {
   if (!force && targetWeek === Number(state.gradesWeek || 0)) return;
 
   state.gradesWeek = targetWeek;
+  state.gradesReports = [];
+  const summary = document.getElementById('gradesSummary');
+  const detail = document.getElementById('gradesDetail');
+  if (summary) summary.innerHTML = '';
+  if (detail) detail.innerHTML = '';
   renderGradesWeekTabs_();
 
   const label = document.getElementById('teamGradesWeekLabel');
@@ -4550,18 +4578,15 @@ async function renderWeeklyTeamGrades(matchups = state.currentMatchups, week = s
       return a.rank - b.rank;
     });
 
+    state.gradesReports = reports;
+    state.gradesWeekComplete = weekComplete;
+    if (!reports.some(report => report.teamId === Number(state.gradesSelectedTeamId))) {
+      const myId = typeof getMyTeamId_ === 'function' ? Number(getMyTeamId_() || 0) : 0;
+      state.gradesSelectedTeamId = reports.some(report => report.teamId === myId)
+        ? myId : (reports.find(report => !report.pending) || reports[0] || {}).teamId;
+    }
     container.classList.remove('skeleton-block');
-    container.innerHTML = `
-      <div class="team-grades-note ${weekComplete ? 'is-locked' : 'is-live'}">
-        <span>${weekComplete ? '✓ FINAL WEEKLY GRADES' : '● PROVISIONAL GRADES'}</span>
-        <p>${weekComplete
-          ? `Week ${safeWeek} is complete. Grades are locked from the final matchup results.`
-          : `Grades lock after every Week ${safeWeek} matchup is completed. Teams still playing remain pending.`}</p>
-      </div>
-      <div class="team-grades-grid">
-        ${reports.map(report => teamGradeCard_(report, weekComplete)).join('')}
-      </div>
-    `;
+    renderGradesPresentation_();
   } catch (error) {
     if (requestToken !== state.teamGradeRequestToken) return;
     container.classList.remove('skeleton-block');
@@ -4654,7 +4679,13 @@ function buildTeamGradeReport_(match, side, snapshot, opponentSnapshot, isComple
     efficiency,
     grade,
     gradeScore,
-    reason
+    reason,
+    components: {
+      projection: projectionComponent * 0.45,
+      rank: rankComponent * 0.30,
+      result: resultComponent * 0.15,
+      efficiency: efficiencyComponent * 0.10
+    }
   };
 }
 
@@ -4772,6 +4803,86 @@ function teamGradeCard_(report, weekComplete) {
       <p class="team-grade-reason">${escapeHtml(report.reason)}</p>
     </article>
   `;
+}
+
+
+/* GRADES COMMAND CENTER V1 — presentation only; grade math remains in buildTeamGradeReport_. */
+function gradeBand_(report) {
+  return report.pending ? 'PENDING' : String(report.grade || 'F').charAt(0);
+}
+function gradeTeamName_(report) {
+  return report.team ? report.team.name : 'Unknown Team';
+}
+function gradeTeamLogo_(report) {
+  return report.team ? `<img src="${escapeAttr(getTeamIcon(report.team))}" alt="" ${teamIconFallbackAttr(report.team)}>` : '';
+}
+function gradeTeamRow_(report, mode) {
+  const selected = Number(state.gradesSelectedTeamId) === Number(report.teamId);
+  const delta = report.projection > 0 ? (report.ratio - 1) * 100 : null;
+  const result = report.pending ? 'PENDING' : report.result === 'W' ? `WIN +${number2(report.margin)}` : report.result === 'L' ? `LOSS −${number2(report.margin)}` : 'TIE';
+  return `<button type="button" class="zg-team-row ${selected ? 'is-selected' : ''}" data-grade-team="${escapeAttr(String(report.teamId))}" aria-pressed="${selected}" aria-label="Show grade breakdown for ${escapeAttr(gradeTeamName_(report))}">
+    ${gradeTeamLogo_(report)}
+    <span class="zg-team-info"><strong>${escapeHtml(gradeTeamName_(report))}</strong><small>${report.pending ? 'Awaiting final results' : `${number2(report.score)} pts · ${delta === null ? 'No projection' : `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}% vs projection`}`}</small></span>
+    ${mode === 'list' ? `<span class="zg-team-result">${escapeHtml(result)}</span>` : ''}
+    <span class="zg-team-grade">${escapeHtml(report.grade)}<small>${report.pending ? '' : report.gradeScore.toFixed(1)}</small></span>
+  </button>`;
+}
+function gradeSummaryHtml_(reports) {
+  const graded = reports.filter(report => !report.pending && Number.isFinite(report.gradeScore));
+  const bands = ['A', 'B', 'C', 'D', 'F'];
+  const average = graded.length ? graded.reduce((sum, report) => sum + report.gradeScore, 0) / graded.length : null;
+  return `<div class="zg-band-stats">${bands.map(band => {
+    const count = graded.filter(report => gradeBand_(report) === band).length;
+    return `<div class="zg-stat zg-band-${band}"><span class="zg-letter">${band}</span><strong>${count}</strong><small>${count === 1 ? 'team' : 'teams'}</small></div>`;
+  }).join('')}</div><div class="zg-average"><span>LEAGUE AVERAGE</span><strong>${average === null ? '—' : escapeHtml(gradeLetter_(average))}</strong><b>${average === null ? 'Pending' : average.toFixed(1) + ' / 100'}</b><small>Mean grade score · ${graded.length} graded</small></div>`;
+}
+function gradeDetailHtml_(report) {
+  if (!report) return '';
+  if (report.pending) return `<div class="zg-detail-pending">${gradeTeamLogo_(report)}<div><strong>${escapeHtml(gradeTeamName_(report))}</strong><p>Grade pending until this matchup finishes. No provisional score is presented as final.</p></div></div>`;
+  const components = report.components || {};
+  const metrics = [
+    ['Beat projection', 45, components.projection, `${report.projection > 0 ? ((report.ratio - 1) * 100).toFixed(0) + '% vs projection' : 'Projection unavailable'}`],
+    ['Scoring rank', 30, components.rank, `#${report.rank} in weekly scoring`],
+    ['Matchup result', 15, components.result, `${report.result === 'W' ? 'Win' : report.result === 'L' ? 'Loss' : 'Tie'} · ${number2(report.margin)}-point margin`],
+    ['Lineup efficiency', 10, components.efficiency, `${report.efficiency.toFixed(0)}% lineup efficiency`]
+  ];
+  return `<div class="zg-detail-title"><span>GRADE BREAKDOWN · WEEK ${escapeHtml(String(state.gradesWeek))}</span><strong>WHY THIS GRADE?</strong></div><div class="zg-detail-grid">
+    <div class="zg-detail-team">${gradeTeamLogo_(report)}<div><strong>${escapeHtml(gradeTeamName_(report))}</strong><small>${escapeHtml(report.grade)} · ${report.gradeScore.toFixed(1)} / 100</small></div><span class="zg-detail-letter">${escapeHtml(report.grade)}</span></div>
+    <div class="zg-detail-metrics">${metrics.map(([label,max,value,context]) => `<div class="zg-detail-metric"><div><strong>${label}</strong><small>${escapeHtml(context)}</small></div><div class="zg-meter" role="meter" aria-label="${label}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${Math.max(0,Number(value || 0)).toFixed(1)}"><i style="width:${Math.min(100,Math.max(0,Number(value || 0)) / max * 100).toFixed(1)}%"></i></div><b>${Number(value || 0).toFixed(1)} <small>/ ${max}</small></b></div>`).join('')}</div>
+    <div class="zg-detail-reason"><strong>PERFORMANCE NOTES</strong><p>${escapeHtml(report.reason)}</p><p>Final score: ${number2(report.score)} · Projection: ${report.projection > 0 ? number2(report.projection) : 'Unavailable'} · Week rank: #${report.rank}</p><small>Scores and lineup data: ESPN via the Zenni API. Grade formula: Zenni League.</small></div>
+  </div>`;
+}
+function renderGradesPresentation_() {
+  const reports = Array.isArray(state.gradesReports) ? state.gradesReports : [];
+  const container = document.getElementById('weeklyTeamGrades');
+  const summary = document.getElementById('gradesSummary');
+  const detail = document.getElementById('gradesDetail');
+  if (!container) return;
+  const mode = ['board','list','cards'].includes(state.gradesViewMode) ? state.gradesViewMode : 'board';
+  document.querySelectorAll('[data-grade-mode]').forEach(button => {
+    const active = button.dataset.gradeMode === mode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  if (summary) summary.innerHTML = gradeSummaryHtml_(reports);
+  const note = `<div class="zg-status ${state.gradesWeekComplete ? 'is-final' : 'is-pending'}">${state.gradesWeekComplete ? '✓ FINAL · WEEK ' + state.gradesWeek + ' · LOCKED' : '● WEEK ' + state.gradesWeek + ' · IN PROGRESS / PENDING'}</div>`;
+  const bands = ['A','B','C','D','F'];
+  const mobileBoard = window.matchMedia('(max-width: 760px)').matches;
+  if (mode === 'board') {
+    container.innerHTML = note + `<div class="zg-board">${bands.map((band,index) => {
+      const members = reports.filter(report => gradeBand_(report) === band);
+      return `<details class="zg-lane zg-lane-${band}" ${!mobileBoard || index === 0 || members.some(report => Number(report.teamId) === Number(state.gradesSelectedTeamId)) ? 'open' : ''}>
+        <summary><span class="zg-lane-letter">${band}</span><span class="zg-lane-title">${band === 'A' ? 'Excellent' : band === 'B' ? 'Strong' : band === 'C' ? 'Solid' : band === 'D' ? 'Below average' : 'Tough week'}</span><span class="zg-lane-count">${members.length} ${members.length === 1 ? 'team' : 'teams'}</span></summary>
+        <div class="zg-lane-rows">${members.length ? members.map(report => gradeTeamRow_(report,'board')).join('') : '<p class="zg-empty">No teams in this grade.</p>'}</div>
+      </details>`;
+    }).join('')}</div>` + (reports.some(report => report.pending) ? `<div class="zg-pending-list"><strong>AWAITING FINAL RESULTS</strong>${reports.filter(report => report.pending).map(report => gradeTeamRow_(report,'list')).join('')}</div>` : '');
+  } else if (mode === 'list') {
+    container.innerHTML = note + `<div class="zg-list">${reports.map(report => gradeTeamRow_(report,'list')).join('')}</div>`;
+  } else {
+    container.innerHTML = note + `<div class="team-grades-grid">${reports.map(report => teamGradeCard_(report, state.gradesWeekComplete)).join('')}</div>`;
+  }
+  const selected = reports.find(report => Number(report.teamId) === Number(state.gradesSelectedTeamId));
+  if (detail) detail.innerHTML = gradeDetailHtml_(selected);
 }
 
 async function changeWeek(delta) {
