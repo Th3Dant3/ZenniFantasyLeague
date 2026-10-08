@@ -630,6 +630,7 @@ async function loadRecapKickoff_() {
     const data = await api_('schedule');
     state.kickoffMs = data && Number.isFinite(Number(data.nextKickoffMs)) ? Number(data.nextKickoffMs) : null;
     if (state.kickoffMs) saveKickoffCache_(state.kickoffMs);
+    if (state.standingsModel && typeof renderStandingsTimeline_ === 'function') renderStandingsTimeline_(state.standingsModel);
   } catch (error) {
     state.kickoffMs = null;
   }
@@ -2881,6 +2882,33 @@ function bindUi() {
 
   document.getElementById('awardsPrevWeek')?.addEventListener('click', () => changeAwardsWeek_(-1));
   document.getElementById('awardsNextWeek')?.addEventListener('click', () => changeAwardsWeek_(1));
+  document.getElementById('awardsSectionTabs')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-awards-section]');
+    if (button) setAwardsSection_(button.dataset.awardsSection);
+  });
+  // Keyboard: arrows/Home/End move focus between the three tabs; Enter or Space opens the focused tab.
+  // (Manual activation on purpose: Season Records is a heavy load and should not fire while arrowing past it.)
+  document.getElementById('awardsSectionTabs')?.addEventListener('keydown', event => {
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+    const tabs = Array.from(event.currentTarget.querySelectorAll('[data-awards-section]'));
+    let index = tabs.indexOf(document.activeElement);
+    if (index < 0) index = tabs.findIndex(tab => tab.classList.contains('is-active'));
+    if (event.key === 'ArrowRight') index = (index + 1) % tabs.length;
+    else if (event.key === 'ArrowLeft') index = (index - 1 + tabs.length) % tabs.length;
+    else if (event.key === 'Home') index = 0;
+    else index = tabs.length - 1;
+    event.preventDefault();
+    tabs[index].focus();
+  });
+  document.querySelector('.wa-shell')?.addEventListener('click', event => {
+    if (event.target.closest('[data-awards-retry]')) renderWeeklyAwards_(state.awardsWeek || getDefaultAwardsWeek_());
+    const pill = event.target.closest('[data-awards-week]');
+    if (pill) {
+      const picked = Number(pill.dataset.awardsWeek);
+      if (picked >= 1 && picked !== Number(state.awardsWeek)) renderWeeklyAwards_(picked);
+    }
+  });
+  bindStandings_();
 
   document.getElementById('gradesWeekTabs')?.addEventListener('click', event => {
     const button = event.target.closest('[data-grades-week]');
@@ -2935,8 +2963,12 @@ function switchView(view) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
   if (nextView === 'awards') {
+    setAwardsSection_(state.awardsSection || 'players');
     renderWeeklyAwards_(state.awardsWeek || getDefaultAwardsWeek_());
-    scheduleSeasonBoard_();
+  }
+
+  if (nextView === 'standings') {
+    onStandingsShown_();
   }
 
   if (nextView === 'grades') {
@@ -2981,9 +3013,10 @@ function hydrateState(data, options = {}) {
     `Last ESPN sync: ${generated.toLocaleString()}${options.source === 'browser-cache' ? ' (cached)' : ''}`;
 
   const preseason = Number(state.league.latestScoringPeriod || 0) < 1;
-  document.getElementById('standingsNote').textContent = preseason
+  const standingsDone = getLastCompletedWeek_();
+  document.getElementById('standingsNote').textContent = standingsDone < 1
     ? 'Preseason — rankings begin after Week 1'
-    : `Through Week ${state.league.latestScoringPeriod}`;
+    : `Through Week ${standingsDone}`;
 
   document.getElementById('heroSubtext').textContent = preseason
     ? 'The field is set. Twelve teams. One championship belt.'
@@ -3414,9 +3447,11 @@ function renderChampionSpotlight() {
 
 
 function getDefaultAwardsWeek_() {
-  const latest = Number(state.league && state.league.latestScoringPeriod || 0);
+  // Last week whose games are all in the books, from ESPN's own W-L-T records.
+  // (latestScoringPeriod flips to the NEXT week before kickoff, so it is not used here.)
+  const done = getLastCompletedWeek_();
   const current = Number(state.league && state.league.currentWeek || 1);
-  return Math.max(1, latest || Math.max(1, current - 1));
+  return Math.max(1, done || Math.max(1, current - 1));
 }
 
 function currentWeekHasPoints_() {
@@ -3540,6 +3575,8 @@ async function renderAllTimeTopStats_() {
     paint();
   } else {
     container.classList.add('skeleton-block');
+    state.awardsRecordSpot = { mode: 'loading' };
+    renderAwardsHero_();
     container.innerHTML = `
       <div class="performers-loading">
         <strong>Building 2026 season record board...</strong>
@@ -3589,6 +3626,8 @@ async function renderAllTimeTopStats_() {
 
   if (!poolsByWeek.size) {
     container.classList.remove('skeleton-block');
+    state.awardsRecordSpot = { mode: 'error', message: 'Season records are not available right now. Try again in a moment.' };
+    renderAwardsHero_();
     container.innerHTML = `<div class="performers-empty"><strong>Unable to load season records.</strong><span>Weekly scoring data is temporarily unavailable. Please retry.</span><button type="button" class="performer-tab" data-retry-season>Retry</button></div>`;
     container.querySelector('[data-retry-season]').addEventListener('click', () => renderAllTimeTopStats_());
     return;
@@ -3597,34 +3636,30 @@ async function renderAllTimeTopStats_() {
   paint();
 }
 
-function renderAllTimePerformerLeaderboard_(container, playerPool) {
-  const categories = ['ALL', 'QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST'];
+function renderAllTimePerformerLeaderboard_(container, playerPool, userAction) {
+  const categories = awardsPositions_();
+  const prevScroll = container.querySelector('.performer-tabs')?.scrollLeft || 0;
   let active = String(state.allTimePerformerPosition || 'ALL').toUpperCase();
   if (!categories.includes(active)) active = 'ALL';
   state.allTimePerformerPosition = active;
 
-  const candidates = topPerformerCandidates_(playerPool, active)
-    .sort((a, b) => b.points - a.points || a.week - b.week || a.name.localeCompare(b.name));
-  const leaders = candidates.slice(0, 5);
+  updateAwardsRecordSpot_(playerPool);
+
+  const leaders = topPerformerCandidates_(playerPool, active)
+    .sort((a, b) => b.points - a.points || a.week - b.week || a.name.localeCompare(b.name))
+    .slice(0, 5);
   const tabLabel = value => value === 'DST' ? 'D/ST' : value;
+  const max = leaders.length ? Number(leaders[0].points) : 0;
 
   const missingWeeks = state.allTimeMissingWeeks || [];
   container.innerHTML = `
     ${missingWeeks.length ? `<div class="performers-empty compact" role="status"><strong>Showing available weekly records.</strong><span>Week ${missingWeeks.join(', ')} data is unavailable. Rankings may change when those weeks load.</span><button type="button" class="performer-tab" data-retry-season>Retry missing weeks</button></div>` : ''}
-    <div class="performer-tabs" role="tablist" aria-label="All-time performer position">
-      ${categories.map(category => `<button class="performer-tab ${category === active ? 'is-active' : ''}" type="button" data-alltime-position="${category}">${tabLabel(category)}</button>`).join('')}
+    <div class="performer-tabs" role="group" aria-label="Filter by position">
+      ${categories.map(category => `<button class="performer-tab ${category === active ? 'is-active' : ''}" type="button" aria-pressed="${category === active ? 'true' : 'false'}" data-alltime-position="${category}">${tabLabel(category)}</button>`).join('')}
     </div>
     <div class="performer-leaderboard-head"><span>${active === 'ALL' ? 'Top 5 Single-Game Performances' : `Top 5 ${tabLabel(active)} Performances`}</span><small>2026 season · starters only</small></div>
     <div class="performer-leaderboard">
-      ${leaders.length ? leaders.map((leader, index) => `
-        <div class="performer-row ${index === 0 ? 'is-player-week' : ''}">
-          <div class="performer-rank">#${index + 1}</div>
-          <div class="performer-copy">
-            <div class="performer-name-line"><strong>${escapeHtml(leader.name)}</strong>${index === 0 ? '<span class="player-week-badge">Season Record</span>' : ''}</div>
-            <span>${escapeHtml(leader.position === 'DST' ? 'D/ST' : leader.position)} · ${escapeHtml(leader.fantasyTeam)} · Week ${leader.week}</span>
-          </div>
-          <div class="performer-points"><strong>${number2(leader.points)}</strong><small>PTS</small></div>
-        </div>`).join('') : `<div class="performers-empty compact"><strong>No qualifying records yet.</strong><span>Records appear after starter points are posted.</span></div>`}
+      ${leaders.length ? leaders.map((leader, index) => awardsRowHtml_(leader, index, max, { kind: 'season', badge: index === 0 ? 'Season Record' : '' })).join('') : `<div class="performers-empty compact"><strong>No qualifying records yet.</strong><span>Records appear after starter points are posted.</span></div>`}
     </div>`;
 
   const retry = container.querySelector('[data-retry-season]');
@@ -3633,9 +3668,291 @@ function renderAllTimePerformerLeaderboard_(container, playerPool) {
   container.querySelectorAll('[data-alltime-position]').forEach(button => {
     button.addEventListener('click', () => {
       state.allTimePerformerPosition = String(button.dataset.alltimePosition || 'ALL').toUpperCase();
-      renderAllTimePerformerLeaderboard_(container, playerPool);
+      renderAllTimePerformerLeaderboard_(container, playerPool, true);
     });
   });
+  restoreChipStrip_(container, prevScroll, userAction);
+}
+
+function awardsLastRecordWeek_() {
+  const currentWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
+  return currentWeekHasPoints_() ? currentWeek : Math.max(1, currentWeek - 1);
+}
+
+function setAwardsSection_(requested) {
+  const allowed = ['players', 'honors', 'records'];
+  const section = allowed.includes(requested) ? requested : 'players';
+  state.awardsSection = section;
+  document.querySelectorAll('[data-awards-section]').forEach(button => {
+    const selected = button.dataset.awardsSection === section;
+    button.classList.toggle('is-active', selected);
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  document.querySelectorAll('[data-awards-panel]').forEach(panel => {
+    panel.hidden = panel.dataset.awardsPanel !== section;
+  });
+
+  // Season Records are season-wide, so the week controls give way to a season note.
+  const records = section === 'records';
+  const setHidden = (id, hidden) => { const el = document.getElementById(id); if (el) el.hidden = hidden; };
+  setHidden('awardsWeekStrip', records);
+  setHidden('awardsWeekStatus', records);
+  setHidden('awardsSeasonNote', !records);
+  setHidden('awardsSeasonChip', !records);
+  const noteWeek = document.getElementById('awardsSeasonNoteWeek');
+  if (noteWeek) noteWeek.textContent = `through Week ${awardsLastRecordWeek_()}`;
+
+  if (records) {
+    if (state.allTimePerformanceCache) updateAwardsRecordSpot_(state.allTimePerformanceCache);
+    else if (!state.awardsRecordSpot) state.awardsRecordSpot = { mode: 'loading' };
+  }
+  renderAwardsHero_();
+  if (records) scheduleSeasonBoard_();
+}
+
+/* ---------- Weekly Awards V4 helpers ---------- */
+function awardsPositions_() { return ['ALL', 'QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST']; }
+
+// ONE ordering drives the hero, the #1 row and the badge, so they can never disagree on a tie.
+function sortAwardsPool_(pool) {
+  return (Array.isArray(pool) ? pool : [])
+    .filter(player => Number.isFinite(Number(player.points)))
+    .slice()
+    .sort((a, b) => Number(b.points) - Number(a.points) ||
+      String(a.name).localeCompare(String(b.name)) ||
+      Number(a.playerId || 0) - Number(b.playerId || 0));
+}
+
+// final = week is in the books; live = some starters have scored; pending = nobody has scored yet.
+function awardsWeekPhase_(week, pool, data) {
+  const hasPoints = pool.some(player => Number(player.points) > 0);
+  const final = isWeekFinal_(week, data);
+  if (!hasPoints) return final ? 'empty' : 'pending';
+  return final ? 'final' : 'live';
+}
+
+function awardsPhaseLabel_(phase) {
+  return { final: 'FINAL RESULTS', live: 'IN PROGRESS', pending: 'NOT STARTED', empty: 'NO DATA' }[phase] || 'CURRENT / UPCOMING';
+}
+
+// Re-rendering rebuilds the chip strip. Keep its scroll position, keep the chosen chip in view,
+// and hand keyboard focus back to the chosen chip.
+function restoreChipStrip_(container, previousScroll, refocus) {
+  const strip = container.querySelector('.performer-tabs');
+  if (!strip) return;
+  strip.scrollLeft = previousScroll || 0;
+  keepActiveInView_(strip, strip.querySelector('.is-active'));
+  if (refocus) {
+    const active = strip.querySelector('.is-active');
+    if (active) active.focus({ preventScroll: true });
+  }
+}
+
+function keepActiveInView_(strip, active) {
+  if (!strip || !active) return;
+  const s = strip.getBoundingClientRect();
+  const a = active.getBoundingClientRect();
+  if (a.left < s.left) strip.scrollLeft -= (s.left - a.left) + 8;
+  else if (a.right > s.right) strip.scrollLeft += (a.right - s.right) + 8;
+}
+
+function friendlyAwardsError_(error, week) {
+  console.warn('Weekly Awards load failed (Week ' + week + '):', error);
+  return "ESPN results aren't available right now. Check your connection and try again.";
+}
+
+function awardsRetryButton_() {
+  return '<button type="button" class="performer-tab" data-awards-retry>Try again</button>';
+}
+
+/* Custom line icons (consistent across Windows / iOS / Android, unlike emoji). */
+function awardsIcon_(key) {
+  const paths = {
+    trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0V4z"/><path d="M8 6H5a1 1 0 0 0-1 1c0 2.2 1.6 4 4 4M16 6h3a1 1 0 0 1 1 1c0 2.2-1.6 4-4 4"/><path d="M12 13v4M8.5 20h7M10 17h4"/>',
+    flame: '<path d="M12 3s5 3.5 5 9a5 5 0 0 1-10 0c0-2 1-3.4 2-4.4.2 1.4.9 2.2 1.8 2.4C10.2 8.2 10.5 5.4 12 3z"/>',
+    watch: '<circle cx="12" cy="13.5" r="7"/><path d="M12 13.5V9.5M9.5 3h5M12 3v3M18.5 7l1.2-1.2"/>',
+    board: '<rect x="3.5" y="6" width="17" height="12" rx="2"/><path d="M8 10v4M12 9v6M16 11v3"/>'
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[key] || paths.board}</svg>`;
+}
+
+function awardsLogoHtml_(team, sizeClass) {
+  const name = team && team.name ? String(team.name) : '';
+  const initials = name.split(/\s+/).filter(Boolean).map(word => word[0]).join('').slice(0, 2).toUpperCase() || '?';
+  const icon = team ? getTeamIcon(team) : '';
+  const img = icon
+    ? `<img class="${teamIconClass(team)}" src="${escapeAttr(icon)}" alt="" loading="lazy" onload="this.parentNode.classList.add('has-img')" ${teamIconFallbackAttr(team)}>`
+    : '';
+  return `<span class="wa-logo ${sizeClass || ''}" aria-hidden="true"><b>${escapeHtml(initials)}</b>${img}</span>`;
+}
+
+function awardsPosTagHtml_(position) {
+  const key = position === 'DST' ? 'DST' : String(position || '').toUpperCase();
+  const label = key === 'DST' ? 'D/ST' : key;
+  return `<span class="wa-pos wa-pos-${escapeAttr(key)}">${escapeHtml(label)}</span>`;
+}
+
+function awardsRowHtml_(player, index, max, ctx) {
+  const team = state.teamMap.get(Number(player.fantasyTeamId));
+  const teamName = player.fantasyTeam || (team && team.name) || '';
+  const pct = max > 0 ? Math.max(0, Math.min(100, Number(player.points) / max * 100)) : 0;
+  const gap = Number(max) - Number(player.points);
+  const delta = index === 0
+    ? ctx.deltaLead || 'PTS · LEADER'
+    : gap < 0.005 ? 'TIED #1' : `−${gap.toFixed(2)}<span class="wa-vs1"> vs #1</span>`;
+  const meta = ctx.kind === 'season'
+    ? `${awardsPosTagHtml_(player.position)}<span class="ell">${escapeHtml(teamName)}</span><span class="dot">·</span><span class="fx">Week ${Number(player.week)}</span>`
+    : `${awardsPosTagHtml_(player.position)}<span class="fx">${escapeHtml(player.nflTeam)}</span><span class="dot">·</span><span class="ell">${escapeHtml(teamName)}</span>`;
+  return `
+        <div class="performer-row ${index === 0 ? 'is-player-week' : ''}">
+          <div class="performer-rank">#${index + 1}</div>
+          ${awardsLogoHtml_(team, 'wa-logo-row')}
+          <div class="performer-copy">
+            <div class="performer-name-line"><strong>${escapeHtml(player.name)}</strong>${ctx.badge && index === 0 ? `<span class="player-week-badge">${escapeHtml(ctx.badge)}</span>` : ''}</div>
+            <span class="performer-meta">${meta}</span>
+          </div>
+          <div class="performer-bar" aria-hidden="true"><i style="width:${pct.toFixed(1)}%"></i></div>
+          <div class="performer-points"><strong>${number2(player.points)}</strong><small>${delta}</small></div>
+        </div>`;
+}
+
+function awardsHonorHtml_(item) {
+  const teams = Array.isArray(item.teams) ? item.teams : [];
+  const teamHtml = teams.map(entry => `<span class="wa-honor-team">${awardsLogoHtml_(entry.team, 'wa-logo-honor')}<span>${escapeHtml(entry.name)}</span></span>`)
+    .join('<span class="wa-honor-vs">VS</span>');
+  return `
+    <div class="pulse-item weekly-spotlight-item wa-honor">
+      <div class="wa-honor-icon">${awardsIcon_(item.iconKey)}</div>
+      <div class="weekly-spotlight-copy">
+        <small>${escapeHtml(item.label)}</small>
+        <strong class="wa-honor-teams">${teamHtml}</strong>
+        <span>${escapeHtml(item.detail)}</span>
+      </div>
+    </div>`;
+}
+
+/* ---- hero: follows the active tab ---- */
+function updateAwardsRecordSpot_(seasonPool) {
+  const top = topPerformerCandidates_(seasonPool || [], 'ALL')
+    .slice()
+    .sort((a, b) => b.points - a.points || a.week - b.week || a.name.localeCompare(b.name))[0];
+  state.awardsRecordSpot = top ? { mode: 'record', leader: top } : { mode: 'none' };
+  renderAwardsHero_();
+}
+
+function renderAwardsHero_() {
+  const box = document.getElementById('awardsPlayerSpotlight');
+  if (!box) return;
+  const records = state.awardsSection === 'records';
+  const s = records
+    ? (state.awardsRecordSpot || { mode: 'loading' })
+    : (state.awardsSpot || { mode: 'loading', week: state.awardsWeek || 1 });
+  const kicker = text => `<span class="wa-spotlight-kicker">${escapeHtml(text)}</span>`;
+  const plain = (head, title, sub) => {
+    box.className = 'wa-spotlight is-plain';
+    box.innerHTML = `<div class="wa-spot-copy">${kicker(head)}<strong>${escapeHtml(title)}</strong>${sub ? `<span class="wa-spot-sub">${escapeHtml(sub)}</span>` : ''}</div>`;
+  };
+
+  if ((s.mode === 'player' || s.mode === 'record') && s.leader) {
+    const p = s.leader;
+    const team = state.teamMap.get(Number(p.fantasyTeamId));
+    const teamName = p.fantasyTeam || (team && team.name) || '';
+    const live = s.phase === 'live';
+    const head = records ? '★ SEASON RECORD HOLDER'
+      : live ? `★ LEADING WEEK ${s.week} · IN PROGRESS`
+      : `★ PLAYER OF THE WEEK · WEEK ${s.week}`;
+    const unit = records ? 'SINGLE-GAME RECORD' : live ? 'POINTS SO FAR' : 'FANTASY POINTS';
+    const meta = records
+      ? `${awardsPosTagHtml_(p.position)}<span>${escapeHtml(teamName)}</span><span class="dot">·</span><span>Week ${Number(p.week)}</span>`
+      : `${awardsPosTagHtml_(p.position)}<span>${escapeHtml(p.nflTeam)}</span><span class="dot">·</span><span>${escapeHtml(teamName)}</span>`;
+    box.className = 'wa-spotlight';
+    box.innerHTML = `
+      <span class="wa-spot-logo">${awardsLogoHtml_(team, 'wa-logo-hero')}</span>
+      <div class="wa-spot-copy">${kicker(head)}<strong>${escapeHtml(p.name)}</strong><span class="wa-spot-meta">${meta}</span></div>
+      <div class="wa-spotlight-points"><b>${number2(p.points)}</b><small>${unit}</small></div>`;
+    return;
+  }
+  if (s.mode === 'pending') return plain(`★ WEEK ${s.week} · NOT STARTED`, 'Waiting for kickoff', "The week's top player appears once starters score points.");
+  if (s.mode === 'empty') return plain(`★ WEEK ${s.week} · NO DATA`, 'No scoring recorded', 'ESPN returned no starter points for this week.');
+  if (s.mode === 'error') return plain(records ? '★ SEASON RECORDS' : `★ WEEK ${s.week}`, 'Results unavailable', s.message || '');
+  if (s.mode === 'none') return plain('★ SEASON RECORDS', 'No records yet', 'Records appear after starter points are posted.');
+  if (records) return plain('★ SEASON RECORDS', 'Loading season records…', 'Building the 2026 record book from every week played.');
+  return plain(`★ WEEK ${s.week || state.awardsWeek || 1}`, 'Loading weekly leader…', 'Waiting for ESPN starter data');
+}
+
+function renderAwardsWeekStrip_() {
+  const pills = document.getElementById('awardsWeekPills');
+  if (!pills) return;
+  const maxWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
+  const latest = getLastCompletedWeek_();
+  const selected = Number(state.awardsWeek || 1);
+  pills.innerHTML = Array.from({ length: maxWeek }, (_, index) => {
+    const week = index + 1;
+    const upcoming = week > latest;
+    return `<button type="button" class="wa-pill ${week === selected ? 'is-active' : ''} ${upcoming ? 'is-upcoming' : ''}" data-awards-week="${week}" aria-pressed="${week === selected ? 'true' : 'false'}" aria-label="Week ${week}${upcoming ? ' (not final)' : ''}">${week}</button>`;
+  }).join('');
+  keepActiveInView_(pills, pills.querySelector('.is-active'));
+}
+
+// Kept as a thin wrapper: stores the weekly spotlight state and repaints the hero.
+function renderAwardsPlayerSpotlight_(week, playerPool, phase) {
+  const leader = sortAwardsPool_(playerPool)[0];
+  state.awardsSpot = (phase === 'pending' || phase === 'empty' || !leader)
+    ? { mode: phase === 'pending' ? 'pending' : 'empty', week, phase }
+    : { mode: 'player', week, phase, leader };
+  renderAwardsHero_();
+}
+
+function renderAwardsLeaderboard_(container, week, pool, phase, userAction) {
+  const prevScroll = container.querySelector('.performer-tabs')?.scrollLeft || 0;
+  container.classList.remove('skeleton-block');
+
+  if (phase === 'pending') {
+    container.innerHTML = `<div class="performers-empty"><strong>Week ${week} hasn't started.</strong><span>Top performers appear once starters score points.</span></div>`;
+    return;
+  }
+  if (phase === 'empty') {
+    container.innerHTML = `<div class="performers-empty"><strong>No starter points for Week ${week}.</strong><span>ESPN returned no scoring for this week. Try again or pick another week.</span>${awardsRetryButton_()}</div>`;
+    return;
+  }
+
+  const categories = awardsPositions_();
+  let active = String(state.awardsPerformerPosition || 'ALL').toUpperCase();
+  if (!categories.includes(active)) active = 'ALL';
+  state.awardsPerformerPosition = active;
+
+  const live = phase === 'live';
+  const sorted = sortAwardsPool_(pool);
+  const leader = sorted[0] || null;
+  // In a live week a 0.00 means "has not played yet", not "scored zero".
+  const eligible = live ? sorted.filter(player => Number(player.points) > 0) : sorted;
+  const leaders = topPerformerCandidates_(eligible, active).slice(0, 5);
+  const tabLabel = value => value === 'DST' ? 'D/ST' : value;
+  const max = leaders.length ? Number(leaders[0].points) : 0;
+
+  container.innerHTML = `
+    <div class="performer-tabs" role="group" aria-label="Filter by position">
+      ${categories.map(category => `<button class="performer-tab ${category === active ? 'is-active' : ''}" type="button" aria-pressed="${category === active ? 'true' : 'false'}" data-performer-position="${category}">${tabLabel(category)}</button>`).join('')}
+    </div>
+    <div class="performer-leaderboard-head">
+      <span>${active === 'ALL' ? 'Top 5 Starters Overall' : `Top 5 ${tabLabel(active)}`}</span>
+      <small>Week ${week} · ${live ? 'in progress · ' : ''}starters only</small>
+    </div>
+    <div class="performer-leaderboard">
+      ${leaders.length ? leaders.map((player, index) => awardsRowHtml_(player, index, max, {
+        kind: 'week',
+        badge: player === leader ? (live ? 'Leading' : 'Player of Week') : ''
+      })).join('') : `<div class="performers-empty compact"><strong>${live ? `No ${escapeHtml(tabLabel(active))} starters have scored yet.` : `No qualifying ${escapeHtml(tabLabel(active))} starters.`}</strong><span>Only players started in this category during Week ${week} are ranked.</span></div>`}
+    </div>`;
+
+  container.querySelectorAll('[data-performer-position]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.awardsPerformerPosition = String(button.dataset.performerPosition || 'ALL').toUpperCase();
+      renderAwardsLeaderboard_(container, week, pool, phase, true);
+    });
+  });
+  restoreChipStrip_(container, prevScroll, userAction);
 }
 
 async function renderWeeklyAwards_(week) {
@@ -3644,12 +3961,11 @@ async function renderWeeklyAwards_(week) {
   const requestToken = ++state.awardsRequestToken;
   const label = document.getElementById('awardsWeekLabel');
   if (label) label.textContent = String(safeWeek);
-
-  const maxWeek = Math.max(1, Number(state.league && state.league.currentWeek || 1));
-  const prev = document.getElementById('awardsPrevWeek');
-  const next = document.getElementById('awardsNextWeek');
-  if (prev) prev.disabled = safeWeek <= 1;
-  if (next) next.disabled = safeWeek >= maxWeek;
+  const weekStatus = document.getElementById('awardsWeekStatus');
+  if (weekStatus) weekStatus.textContent = safeWeek <= getLastCompletedWeek_() ? 'FINAL RESULTS' : 'CURRENT / UPCOMING';
+  renderAwardsWeekStrip_();
+  state.awardsSpot = { mode: 'loading', week: safeWeek };
+  renderAwardsHero_();
 
   const performerContainer = document.getElementById('awardsTopStats');
   if (performerContainer) {
@@ -3663,7 +3979,7 @@ async function renderWeeklyAwards_(week) {
     const data = await getWeekPerformance_(safeWeek);
     if (requestToken !== state.awardsRequestToken) return;
     const snapshots = performanceSnapshots_(data);
-    renderLeaguePulse(data.matchups, safeWeek, 'awardsLeaguePulse');
+    renderLeaguePulse(data.matchups, safeWeek, 'awardsLeaguePulse', { awards: true });
 
     const pool = [];
     snapshots.forEach(snapshot => {
@@ -3678,23 +3994,20 @@ async function renderWeeklyAwards_(week) {
       });
     });
 
-    if (performerContainer) {
-      performerContainer.classList.remove('skeleton-block');
-      const previous = state.topPerformerPosition;
-      state.topPerformerPosition = state.awardsPerformerPosition || 'ALL';
-      renderTopPerformerLeaderboard_(performerContainer, safeWeek, pool);
-      state.awardsPerformerPosition = state.topPerformerPosition;
-      state.topPerformerPosition = previous;
-      performerContainer.querySelectorAll('[data-performer-position]').forEach(button => {
-        button.addEventListener('click', () => { state.awardsPerformerPosition = String(button.dataset.performerPosition || 'ALL').toUpperCase(); }, { capture:true });
-      });
-    }
+    const phase = awardsWeekPhase_(safeWeek, pool, data);
+    if (weekStatus) weekStatus.textContent = awardsPhaseLabel_(phase);
+    renderAwardsPlayerSpotlight_(safeWeek, pool, phase);
+    if (performerContainer) renderAwardsLeaderboard_(performerContainer, safeWeek, pool, phase, false);
   } catch (error) {
     if (requestToken !== state.awardsRequestToken) return;
-    if (pulse) pulse.innerHTML = `<div class="performers-empty">Unable to load Week ${safeWeek} team performance. ${escapeHtml(error.message || String(error))}</div>`;
+    const message = friendlyAwardsError_(error, safeWeek);
+    if (weekStatus) weekStatus.textContent = 'UNAVAILABLE';
+    state.awardsSpot = { mode: 'error', week: safeWeek, message };
+    renderAwardsHero_();
+    if (pulse) pulse.innerHTML = `<div class="performers-empty"><strong>Team honors unavailable.</strong><span>${escapeHtml(message)}</span>${awardsRetryButton_()}</div>`;
     if (performerContainer) {
       performerContainer.classList.remove('skeleton-block');
-      performerContainer.innerHTML = `<div class="performers-empty"><strong>Unable to load Week ${safeWeek} awards.</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
+      performerContainer.innerHTML = `<div class="performers-empty"><strong>Unable to load Week ${safeWeek} awards.</strong><span>${escapeHtml(message)}</span>${awardsRetryButton_()}</div>`;
     }
   }
 }
@@ -4319,7 +4632,7 @@ function featuredTeamMarkup(team, score, side, status) {
   `;
 }
 
-function renderLeaguePulse(matchups = state.currentMatchups, week = state.selectedWeek, containerId = 'leaguePulse') {
+function renderLeaguePulse(matchups = state.currentMatchups, week = state.selectedWeek, containerId = 'leaguePulse', opts = {}) {
   const container = document.getElementById(containerId);
   if (!container) return;
 
@@ -4329,7 +4642,7 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
     Number(match.awayScore || 0) > 0
   );
 
-  const weekIsComplete = Number(state.league.latestScoringPeriod || 0) >= Number(week);
+  const weekIsComplete = opts.awards ? isWeekFinal_(week, { matchups: games }) : Number(state.league.latestScoringPeriod || 0) >= Number(week);
   const hasMeaningfulScores = scoredGames.length > 0;
 
   container.classList.remove('skeleton-block');
@@ -4338,7 +4651,7 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
     const scheduledCount = games.length;
     container.innerHTML = `
       <div class="weekly-spotlight-waiting">
-        <div class="spotlight-wait-icon">🏈</div>
+        <div class="spotlight-wait-icon">${opts.awards ? awardsIcon_('board') : '🏈'}</div>
         <div>
           <strong>Week ${escapeHtml(String(week))} spotlight is waiting for kickoff.</strong>
           <span>${escapeHtml(String(scheduledCount))} matchups are scheduled. High score, biggest win, closest battle and the week's shootout will appear here as points come in.</span>
@@ -4400,7 +4713,7 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
 
   if (highScore) {
     items.push({
-      icon: '🏆',
+      icon: '🏆', iconKey: 'trophy', teams: [{ team: highScore.team, name: highScore.team.name }],
       label: weekIsComplete ? 'Team of the Week' : 'High Score Right Now',
       title: highScore.team.name,
       detail: `${number2(highScore.score)} points${highScore.opponent ? ` vs ${highScore.opponent.name}` : ''}.`
@@ -4415,7 +4728,7 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
     const margin = Math.abs(homeScore - awayScore);
 
     items.push({
-      icon: '🔥',
+      icon: '🔥', iconKey: 'flame', teams: [{ team: winner, name: winner ? winner.name : 'Weekly leader' }],
       label: 'Biggest Win',
       title: winner ? winner.name : 'Weekly leader',
       detail: `${number2(margin)}-point margin.`
@@ -4428,7 +4741,7 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
     const margin = Math.abs(Number(closestMatch.homeScore || 0) - Number(closestMatch.awayScore || 0));
 
     items.push({
-      icon: '⚡',
+      icon: '⚡', iconKey: 'watch', teams: [{ team: home, name: home ? home.name : 'Home' }, { team: away, name: away ? away.name : 'Away' }],
       label: 'Closest Battle',
       title: `${home ? home.name : 'Home'} vs ${away ? away.name : 'Away'}`,
       detail: `${number2(margin)} points separate them.`
@@ -4441,11 +4754,16 @@ function renderLeaguePulse(matchups = state.currentMatchups, week = state.select
     const total = Number(shootoutMatch.homeScore || 0) + Number(shootoutMatch.awayScore || 0);
 
     items.push({
-      icon: '💥',
+      icon: '💥', iconKey: 'board', teams: [{ team: home, name: home ? home.name : 'Home' }, { team: away, name: away ? away.name : 'Away' }],
       label: 'Weekly Shootout',
       title: `${home ? home.name : 'Home'} vs ${away ? away.name : 'Away'}`,
       detail: `${number2(total)} combined points.`
     });
+  }
+
+  if (opts.awards) {
+    container.innerHTML = items.slice(0, 4).map(awardsHonorHtml_).join('');
+    return;
   }
 
   container.innerHTML = items.slice(0, 4).map(item => `
@@ -6077,12 +6395,6 @@ function triggerBattleImpactParticles_(stage) {
   }, 900);
 }
 
-function renderStandings() {
-  renderConferenceStandings(0, 'afcStandings');
-  renderConferenceStandings(1, 'nfcStandings');
-}
-
-
 function renderStandingsPreview() {
   const container = document.getElementById('standingsPreview');
   if (!container) return;
@@ -6127,74 +6439,595 @@ function renderStandingsPreview() {
   `;
 }
 
+/* =========================================================
+   STANDINGS V5: hero timeline, live insights, ESPN seeds, bracket, motion
+   ========================================================= */
+const STANDINGS_BASELINE_KEY = 'ZENNI_FANTASY_STANDINGS_BASELINE_V1';
+
+// What is actually finished? Observed from ESPN's own W-L-T records, not assumed.
+// (ESPN's latestScoringPeriod flips to the NEXT week before kickoff, so it cannot be used for this.)
+function getLastCompletedWeek_() {
+  const rows = Array.isArray(state.standings) ? state.standings : [];
+  const played = rows.map(row => Number(row.wins || 0) + Number(row.losses || 0) + Number(row.ties || 0));
+  return played.length ? Math.max(0, ...played) : 0;
+}
+
+// A week is final if every team has played it, or ESPN has already named a winner in every matchup.
+function isWeekFinal_(week, data) {
+  if (Number(week) <= getLastCompletedWeek_()) return true;
+  const matchups = data && Array.isArray(data.matchups) ? data.matchups : [];
+  return matchups.length > 0 && matchups.every(match => String(match && match.status || '').toUpperCase() === 'FINAL');
+}
+
+function stGames_(row) { return Number(row.wins || 0) + Number(row.losses || 0) + Number(row.ties || 0); }
+function stPct_(row) { const g = stGames_(row); return g ? (Number(row.wins || 0) + Number(row.ties || 0) / 2) / g : 0; }
+function stCompare_(a, b) {
+  return (stPct_(b) - stPct_(a)) || (Number(b.pointsFor || 0) - Number(a.pointsFor || 0)) || String(a.teamName || '').localeCompare(String(b.teamName || ''));
+}
+function stStreak_(row) {
+  const m = /^([WLT])(\d+)$/i.exec(String(row.streak || ''));
+  return m ? { type: m[1].toUpperCase(), len: Number(m[2]) } : { type: '', len: 0 };
+}
+function stRecord_(row) { return `${Number(row.wins || 0)}-${Number(row.losses || 0)}-${Number(row.ties || 0)}`; }
+// Teams that skip round 1: everyone beyond the largest power of two plays in.
+function stByes_(n) { const full = Math.pow(2, Math.floor(Math.log2(Math.max(1, n)))); return n - (n - full) * 2; }
+
+function buildStandingsModel_() {
+  const rows = (Array.isArray(state.standings) ? state.standings : []).map(row => Object.assign({}, row));
+  const league = state.league || {};
+  const playoffTeams = Number(league.playoffTeams || 0);
+  const through = getLastCompletedWeek_();
+
+  rows.forEach(row => { row.team = state.teamMap.get(Number(row.teamId)); row.seed = null; });
+
+  // Conference rank: ESPN-derived divisionRank when complete, otherwise computed.
+  [0, 1].forEach(conf => {
+    const group = rows.filter(row => Number(row.divisionId) === conf);
+    const useBackend = group.length > 0 && group.every(row => row.divisionRank != null && Number.isFinite(Number(row.divisionRank)));
+    const sorted = group.slice().sort(useBackend
+      ? (a, b) => Number(a.divisionRank) - Number(b.divisionRank)
+      : (through > 0 ? stCompare_ : (a, b) => Number(a.teamId) - Number(b.teamId)));
+    sorted.forEach((row, index) => { row.crank = index + 1; });
+  });
+
+  // Seeds: ESPN's own playoffSeed when it is a clean 1..N, else a rule that reproduces ESPN's bracket:
+  // conference leaders take seeds 1-2, everyone else by record then points, top N make the field.
+  let seedSource = 'none';
+  if (through > 0 && playoffTeams > 0) {
+    const espn = rows.filter(row => Number(row.playoffSeed) >= 1 && Number(row.playoffSeed) <= playoffTeams);
+    const unique = new Set(espn.map(row => Number(row.playoffSeed)));
+    if (espn.length === playoffTeams && unique.size === playoffTeams) {
+      espn.forEach(row => { row.seed = Number(row.playoffSeed); });
+      seedSource = 'espn';
+    } else {
+      const leaders = [0, 1]
+        .map(conf => rows.filter(row => Number(row.divisionId) === conf).sort(stCompare_)[0])
+        .filter(Boolean).sort(stCompare_);
+      const rest = rows.filter(row => !leaders.includes(row)).sort(stCompare_);
+      leaders.forEach((row, index) => { if (index < playoffTeams) row.seed = index + 1; });
+      rest.slice(0, Math.max(0, playoffTeams - leaders.length)).forEach((row, index) => { row.seed = leaders.length + index + 1; });
+      seedSource = 'derived';
+    }
+  }
+
+  const bySeed = new Map();
+  rows.forEach(row => { if (row.seed != null) bySeed.set(row.seed, row); });
+  const out = rows.filter(row => row.seed == null).sort(stCompare_);
+  return {
+    rows, through, playoffTeams, seedSource, bySeed,
+    pfMax: Math.max(0, ...rows.map(row => Number(row.pointsFor || 0))),
+    firstOut: out[0] || null,
+    byConf: { 0: rows.filter(r => Number(r.divisionId) === 0).sort((a, b) => a.crank - b.crank), 1: rows.filter(r => Number(r.divisionId) === 1).sort((a, b) => a.crank - b.crank) }
+  };
+}
+
+/* ---------- snapshots: what changed since the last render / the last visit ---------- */
+function stSnapshot_(model) {
+  const rows = {};
+  model.rows.forEach(row => {
+    rows[row.teamId] = { crank: row.crank, seed: row.seed, rec: stRecord_(row), pf: Number(row.pointsFor || 0), pa: Number(row.pointsAgainst || 0), sk: String(row.streak || '') };
+  });
+  return { through: model.through, rows };
+}
+
+function stDiff_(prev, cur) {
+  const moves = {}, flash = new Set();
+  Object.keys(cur.rows).forEach(id => {
+    const p = prev.rows[id], c = cur.rows[id];
+    if (!p) return;
+    moves[id] = { dRank: p.crank - c.crank };
+    if (p.seed !== c.seed) flash.add(id + ':seed');
+    if (p.rec !== c.rec) flash.add(id + ':rec');
+    if (Math.abs(p.pf - c.pf) > 0.001) { flash.add(id + ':pf'); flash.add(id + ':diff'); }
+    if (Math.abs(p.pa - c.pa) > 0.001) { flash.add(id + ':pa'); flash.add(id + ':diff'); }
+    if (p.sk !== c.sk) flash.add(id + ':sk');
+  });
+  const moved = Object.values(moves).some(m => m.dRank !== 0);
+  return { moves, flash, changed: moved || flash.size > 0 };
+}
+
+function stLoadBaseline_() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STANDINGS_BASELINE_KEY) || 'null');
+    return raw && raw.rows && Number.isFinite(Number(raw.through)) ? raw : null;
+  } catch (error) { return null; }
+}
+function stSaveBaseline_() {
+  try { if (state.standingsPrev && Object.keys(state.standingsPrev.rows).length) localStorage.setItem(STANDINGS_BASELINE_KEY, JSON.stringify(state.standingsPrev)); } catch (error) { /* ignore */ }
+}
+
+function stFlash_(id, field) {
+  return state.standingsFlash && state.standingsFlash.has(id + ':' + field) && !recapPrefersReducedMotion_() ? ' st-fl' : '';
+}
+function stIsVisible_() { return state.activeView === 'standings'; }
+
+/* ---------- render ---------- */
+const ST_CONF = [{ id: 0, name: 'AFC', color: '#ff7043' }, { id: 1, name: 'NFC', color: '#4bb5ff' }];
+
+function stCrownSvg_() {
+  return '<svg class="st-crown" viewBox="0 0 24 24" role="img" aria-label="Defending champion"><path d="M3 19h18l-1.6-11-4.6 4.2L12 5 9.2 12.2 4.6 8z"/></svg>';
+}
+function stSeedChipHtml_(model, row, extra) {
+  if (model.seedSource === 'none') return `<span class="st-seedchip is-none ${extra || ''}">–</span>`;
+  if (row.seed == null) return `<span class="st-seedchip is-out ${extra || ''}" title="Outside the playoff field">–</span>`;
+  const bye = row.seed <= stByes_(model.playoffTeams);
+  return `<span class="st-seedchip ${bye ? 'is-bye' : 'is-play'} ${extra || ''}" title="Seed ${row.seed}">${row.seed}</span>`;
+}
+function stMoveChipHtml_(id) {
+  const move = state.standingsMoves && state.standingsMoves[id];
+  if (!move || !move.dRank) return '';
+  const up = move.dRank > 0;
+  return `<span class="st-mv ${up ? 'is-up' : 'is-down'}" title="Conference rank change"><span aria-hidden="true">${up ? '▲' : '▼'}</span>${Math.abs(move.dRank)}<span class="st-sr"> places ${up ? 'up' : 'down'}</span></span>`;
+}
+
+function stRowHtml_(model, row, index) {
+  const id = Number(row.teamId), team = row.team;
+  const pf = Number(row.pointsFor || 0), pa = Number(row.pointsAgainst || 0), diff = pf - pa;
+  const out = model.seedSource !== 'none' && row.seed == null;
+  const streak = stStreak_(row);
+  const streakClass = streak.type === 'W' ? 'is-w' : streak.type === 'L' ? 'is-l' : 'is-t';
+  const owner = team ? ownerText(team) : '';
+  const width = model.pfMax > 0 ? (pf / model.pfMax * 100).toFixed(1) : '0';
+  const name = escapeHtml(row.teamName || (team && team.name) || 'Team ' + id);
+  return `
+    <div class="st-row ${row.defendingChampion ? 'is-champ' : ''} ${out ? 'is-out' : ''}" role="row" data-team-id="${id}" style="--n:${index}">
+      <div class="st-cell st-seed" role="cell">${stSeedChipHtml_(model, row, stFlash_(id, 'seed'))}</div>
+      <div class="st-cell st-team" role="cell">
+        ${awardsLogoHtml_(team, 'st-logo')}
+        <div class="st-teamtext">
+          <span class="st-nameline"><button type="button" class="st-teambtn" data-open-team="${id}">${name}</button>${row.defendingChampion ? stCrownSvg_() : ''}${stMoveChipHtml_(id)}</span>
+          <span class="st-owner">${escapeHtml(owner)}</span>
+        </div>
+      </div>
+      <div class="st-cell st-rec" role="cell"><span class="${stFlash_(id, 'rec').trim()}">${stRecord_(row)}</span></div>
+      <div class="st-cell st-pf" role="cell" data-label="Points for"><b class="${stFlash_(id, 'pf').trim()}" data-count="${pf.toFixed(2)}">${number2(pf)}</b><div class="st-bar" aria-hidden="true"><i style="width:${width}%"></i></div></div>
+      <div class="st-cell st-pa" role="cell" data-label="Against"><span class="${stFlash_(id, 'pa').trim()}">${number2(pa)}</span></div>
+      <div class="st-cell st-diff ${diff >= 0 ? 'is-pos' : 'is-neg'}" role="cell" data-label="Diff"><span class="${stFlash_(id, 'diff').trim()}">${diff >= 0 ? '+' : '−'}${number2(Math.abs(diff))}</span></div>
+      <div class="st-cell st-strk" role="cell" data-label="Streak"><i class="st-streak ${streakClass} ${stFlash_(id, 'sk').trim()}">${escapeHtml(streak.type ? row.streak : '–')}</i></div>
+      <div class="st-cell st-go" aria-hidden="true">›</div>
+    </div>`;
+}
+
+function stConfCardHtml_(model, conf) {
+  const rows = model.byConf[conf.id] || [];
+  const inField = rows.filter(row => row.seed != null).length;
+  let cutDone = false, body = '';
+  rows.forEach((row, index) => {
+    if (model.seedSource !== 'none' && row.seed == null && !cutDone && inField > 0) {
+      cutDone = true;
+      body += '<div class="st-cut" role="presentation">Outside the playoff field</div>';
+    }
+    body += stRowHtml_(model, row, index);
+  });
+  const count = model.seedSource === 'none' ? `${rows.length} teams` : `${inField} of ${rows.length} in the playoff field`;
+  return `
+    <article class="st-card" data-conf="${conf.id}" aria-label="${conf.name} standings">
+      <div class="st-card-h"><i style="background:${conf.color}"></i><h3>${conf.name}</h3><span class="st-count">${count}</span></div>
+      <div class="st-table" role="table" aria-label="${conf.name} standings table">
+        <div class="st-head" role="row">
+          <div role="columnheader">Seed</div><div role="columnheader">Team</div><div role="columnheader">W-L-T</div><div role="columnheader">Points for</div><div role="columnheader">Against</div><div role="columnheader">Diff</div><div role="columnheader">Streak</div><div aria-hidden="true"></div>
+        </div>
+        ${body}
+      </div>
+    </article>`;
+}
+
+function stFmtKickoff_(ms) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { weekday: 'long', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }).formatToParts(new Date(ms));
+    const get = type => (parts.find(p => p.type === type) || {}).value || '';
+    return `${get('weekday')} ${get('hour')}:${get('minute')} ${get('dayPeriod')} ET`;
+  } catch (error) { return ''; }
+}
+
+function renderStandingsTimeline_(model) {
+  const box = document.getElementById('stTimeline');
+  if (!box) return;
+  model = model || state.standingsModel;
+  if (!model) return;
+  const league = state.league || {};
+  const regular = Math.max(1, Number(league.regularSeasonWeeks || 14));
+  const hasPlayoffs = Number(league.playoffTeams || 0) === 10;
+  const finalWeek = regular + (hasPlayoffs ? 4 : 0);
+  const through = model.through, upcoming = through + 1;
+  const head = through < 1 ? 'Preseason' : through >= finalWeek ? 'Season complete' : `Through week ${through}`;
+  let kick = '';
+  if (through < finalWeek && state.kickoffMs && state.kickoffMs > Date.now()) kick = `Week ${upcoming} kicks off ${stFmtKickoff_(state.kickoffMs)}`;
+  else if (through < 1) kick = 'Rankings begin after week 1';
+
+  let blocks = '';
+  for (let w = 1; w <= regular; w++) {
+    const cls = [w <= through ? 'is-done' : '', w === upcoming ? 'is-now' : '', state.standingsFreshWeek === w ? 'is-fresh' : ''].join(' ');
+    blocks += `<i class="st-block ${cls}" style="--i:${w - 1}" ${w === upcoming ? 'aria-label="Next week"' : ''}>${w}</i>`;
+  }
+  if (hasPlayoffs) {
+    blocks += '<i class="st-block is-gap" aria-hidden="true"></i>';
+    for (let w = regular + 1; w <= finalWeek; w++) blocks += `<i class="st-block ${w === finalWeek ? 'is-fin' : 'is-po'} ${w <= through ? 'is-done' : ''}">${w}</i>`;
+  }
+  box.innerHTML = `
+    <div class="st-tl-top"><b class="${state.standingsFreshWeek && !recapPrefersReducedMotion_() ? 'st-fl' : ''}">${head}</b><span>${escapeHtml(kick)}</span></div>
+    <div class="st-tl-bar" role="img" aria-label="${escapeAttr(head)} of ${finalWeek} weeks">${blocks}</div>
+    <div class="st-tl-lab"><span>Regular season, ${regular} weeks</span>${hasPlayoffs ? `<span><b>Playoffs</b> weeks ${regular + 1} to ${finalWeek}, champion crowned week ${finalWeek}</span>` : ''}</div>`;
+  const sub = document.getElementById('stSub');
+  if (sub) sub.textContent = hasPlayoffs ? `Where every team stands, and who is on track for the week ${finalWeek} championship.` : 'Where every team stands.';
+}
+
+function renderStandingsLegend_(model) {
+  const box = document.getElementById('stLegend');
+  if (!box) return;
+  if (model.seedSource === 'none') { box.innerHTML = ''; return; }
+  const regular = Number(state.league && state.league.regularSeasonWeeks || 14);
+  const byes = stByes_(model.playoffTeams);
+  const note = model.seedSource === 'espn'
+    ? `Seeds are ESPN's projection and move until week ${regular}.`
+    : `Projected seeds from record, then points. They move until week ${regular}.`;
+  box.innerHTML = `
+    <span><span class="st-seedchip is-bye">1</span><span class="st-long">Round 1 bye, seeds 1 to ${byes}</span><span class="st-short">Bye, 1 to ${byes}</span></span>
+    <span><span class="st-seedchip is-play">${byes + 2}</span><span class="st-long">Plays in week ${regular + 1}, seeds ${byes + 1} to ${model.playoffTeams}</span><span class="st-short">Week ${regular + 1}, ${byes + 1} to ${model.playoffTeams}</span></span>
+    <span><span class="st-seedchip is-out">–</span><span class="st-long">Outside the field</span><span class="st-short">Out</span></span>
+    <span class="st-note">${note}</span>`;
+}
+
+function stInsightCell_(label, row, text) {
+  if (!row) return '';
+  return `<div class="st-ins-cell"><div class="st-ins-l">${label}</div><div class="st-ins-m">${awardsLogoHtml_(row.team, 'st-logo-in')}<strong>${escapeHtml(row.teamName || '')}</strong></div><div class="st-ins-s">${text}</div></div>`;
+}
+
+// Replaces the old static "At a Glance" ribbon with facts computed from the live standings.
 function renderGlanceRibbon() {
   const container = document.getElementById('glanceRibbon');
   if (!container || !state.league) return;
+  const model = state.standingsModel || buildStandingsModel_();
+  if (model.through < 1 || !model.rows.length) { container.innerHTML = ''; container.hidden = true; return; }
+  container.hidden = false;
 
-  const afcTeams = state.teams.filter(team => Number(team.divisionId) === 0).length;
-  const nfcTeams = state.teams.filter(team => Number(team.divisionId) === 1).length;
+  const byPf = model.rows.slice().sort((a, b) => Number(b.pointsFor || 0) - Number(a.pointsFor || 0));
+  const pfRank = row => byPf.findIndex(item => item.teamId === row.teamId) + 1;
+  const ordinal = n => n === 1 ? 'Most points in the league' : ({ 2: 'Second most points', 3: 'Third most points' }[n] || `${n}th most points`);
+  const leader = model.rows.slice().sort(stCompare_)[0];
+  const unlucky = model.rows.filter(row => Number(row.wins) < Number(row.losses)).sort((a, b) => Number(b.pointsFor) - Number(a.pointsFor))[0];
+  const lastIn = model.bySeed.get(model.playoffTeams);
+  const skid = model.rows.filter(row => stStreak_(row).type === 'L' && stStreak_(row).len >= 2).sort((a, b) => stStreak_(b).len - stStreak_(a).len)[0];
 
-  const items = [
-    ['At a Glance', '', ''],
-    ['👥', state.league.teamCount, 'Teams'],
-    ['🅰️', afcTeams, 'AFC Teams'],
-    ['🅽', nfcTeams, 'NFC Teams'],
-    ['📅', state.league.regularSeasonWeeks, 'Regular Season Weeks'],
-    ['🏆', state.league.playoffTeams, 'Playoff Spots']
-  ];
-
-  container.innerHTML = items.map((item, index) => {
-    if (index === 0) {
-      return `<div class="glance-item glance-label"><span class="section-kicker">${item[0]}</span></div>`;
-    }
-    return `
-      <div class="glance-item">
-        <span class="glance-icon">${item[0]}</span>
-        <strong>${escapeHtml(String(item[1]))}</strong>
-        <small>${escapeHtml(item[2])}</small>
-      </div>
-    `;
-  }).join('');
+  const cells = [
+    stInsightCell_('Best record', leader, `${stRecord_(leader)}${pfRank(leader) === 1 ? ` with the most points for (${number2(leader.pointsFor)}).` : ` and ${number2(leader.pointsFor)} points for.`}`),
+    stInsightCell_('Most unlucky', unlucky, unlucky ? `${ordinal(pfRank(unlucky))} (${number2(unlucky.pointsFor)}) but only ${stRecord_(unlucky)}.` : ''),
+    model.seedSource !== 'none' && lastIn && model.firstOut
+      ? stInsightCell_('On the bubble', lastIn, `Last team in at seed ${model.playoffTeams}, ${number2(Number(lastIn.pointsFor) - Number(model.firstOut.pointsFor))} points ahead of ${escapeHtml(model.firstOut.teamName)}, the first team out.`) : '',
+    stInsightCell_('Longest skid', skid, skid ? `${escapeHtml(skid.streak)} and ${stRecord_(skid)}${model.seedSource !== 'none' ? (skid.seed == null ? ', outside the playoff field.' : ', still in the playoff field.') : '.'}` : '')
+  ].filter(Boolean);
+  container.innerHTML = cells.join('');
+  container.style.setProperty('--cells', String(Math.max(1, cells.length)));
 }
 
-function renderConferenceStandings(divisionId, targetId) {
-  const target = document.getElementById(targetId);
-
-  const rows = state.standings
-    .filter(row => Number(row.divisionId) === Number(divisionId))
-    .sort((a, b) => {
-      if (a.divisionRank == null && b.divisionRank == null) {
-        return Number(a.teamId) - Number(b.teamId);
-      }
-      return Number(a.divisionRank || 99) - Number(b.divisionRank || 99);
+function stCaptureTops_() {
+  const tops = {};
+  document.querySelectorAll('[data-view="standings"] .st-row').forEach(row => { tops[row.dataset.teamId] = row.getBoundingClientRect().top; });
+  return tops;
+}
+function stFlip_(tops) {
+  if (!tops || recapPrefersReducedMotion_()) return;
+  document.querySelectorAll('[data-view="standings"] .st-row').forEach(row => {
+    const old = tops[row.dataset.teamId];
+    if (old == null) return;
+    const dy = old - row.getBoundingClientRect().top;
+    if (Math.abs(dy) < 1) return;
+    row.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 520, easing: 'cubic-bezier(.2,.8,.2,1)' });
+  });
+}
+function stSlideFrom_(baseline) {
+  if (!baseline || recapPrefersReducedMotion_()) return;
+  document.querySelectorAll('[data-view="standings"] .st-card').forEach(card => {
+    const rows = Array.from(card.querySelectorAll('.st-row'));
+    const height = rows[0] ? rows[0].getBoundingClientRect().height : 66;
+    rows.forEach((row, index) => {
+      const before = baseline.rows[row.dataset.teamId];
+      if (!before) return;
+      const dy = (before.crank - 1 - index) * height;
+      if (Math.abs(dy) < 1) return;
+      row.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 520, easing: 'cubic-bezier(.2,.8,.2,1)' });
     });
-
-  target.innerHTML = rows.map(row => {
-    const team = state.teamMap.get(Number(row.teamId));
-    const rank = row.divisionRank == null ? '--' : row.divisionRank;
-
-    return `
-      <tr data-team-id="${row.teamId}">
-        <td class="${rank === '--' ? 'rank-dash' : ''}">${rank}</td>
-        <td>
-          <div class="standings-team">
-            <img class="standing-logo custom-team-icon ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
-            <div class="standing-name">
-              <strong>
-                ${escapeHtml(row.teamName)}
-                ${row.defendingChampion ? '<span class="champion-crown">♛</span>' : ''}
-              </strong>
-              <span>${escapeHtml(team ? ownerText(team) : '')}</span>
-            </div>
-          </div>
-        </td>
-        <td>${row.wins}-${row.losses}-${row.ties}</td>
-        <td>${number2(row.pointsFor)}</td>
-        <td>${escapeHtml(row.streak || '-')}</td>
-      </tr>
-    `;
-  }).join('');
+  });
 }
+function stScheduleFlashClear_() {
+  window.clearTimeout(state.standingsFlashTimer);
+  state.standingsFlashTimer = window.setTimeout(() => {
+    state.standingsFlash = new Set();
+    state.standingsFreshWeek = null;
+    // Remove one-shot classes so a later show/hide of the tab can never replay them.
+    document.querySelectorAll('[data-view="standings"] .st-fl, [data-view="standings"] .is-fresh').forEach(el => el.classList.remove('st-fl', 'is-fresh'));
+  }, 1500);
+}
+
+function renderStandings() {
+  const grid = document.getElementById('stConfGrid');
+  if (!grid) return;
+  const visible = stIsVisible_();
+  const focusedTeam = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.openTeam : null;
+  const tops = visible && state.standingsPrev ? stCaptureTops_() : null;
+
+  const model = buildStandingsModel_();
+  state.standingsModel = model;
+  const cur = stSnapshot_(model);
+  const prev = state.standingsPrev && Object.keys(state.standingsPrev.rows).length ? state.standingsPrev : null;
+
+  if (prev) {
+    const diff = stDiff_(prev, cur);
+    if (diff.changed) {
+      state.standingsMoves = diff.moves;
+      state.standingsFlash = diff.flash;
+      if (cur.through > prev.through) state.standingsFreshWeek = cur.through;
+      if (!visible) state.standingsSlide = state.standingsSlide || prev;
+    }
+  } else if (!state.standingsInitialised) {
+    // First render of this visit: compare with the standings the person last SAW.
+    const baseline = stLoadBaseline_();
+    if (baseline && baseline.through < cur.through) {
+      const diff = stDiff_(baseline, cur);
+      if (diff.changed) {
+        state.standingsMoves = diff.moves;
+        state.standingsFlash = diff.flash;
+        state.standingsFreshWeek = cur.through;
+        state.standingsSlide = baseline;
+      }
+    }
+  }
+  if (cur.through > 0) state.standingsInitialised = true;
+
+  grid.innerHTML = ST_CONF.map(conf => stConfCardHtml_(model, conf)).join('');
+  renderStandingsTimeline_(model);
+  renderStandingsLegend_(model);
+  renderStandingsBracket_(model);
+  state.standingsPrev = cur;
+
+  if (focusedTeam) { const again = grid.querySelector(`[data-open-team="${focusedTeam}"]`); if (again) again.focus({ preventScroll: true }); }
+  if (visible) { stFlip_(tops); stScheduleFlashClear_(); stSaveBaseline_(); }
+}
+
+/* ---------- once-per-visit intro + "since your last visit" ---------- */
+function stCountUp_(el, target, duration, delay) {
+  const start = performance.now() + delay;
+  const step = now => {
+    const p = Math.min(1, Math.max(0, (now - start) / duration));
+    el.textContent = (target * (1 - Math.pow(1 - p, 3))).toFixed(2);
+    if (p < 1) requestAnimationFrame(step); else el.textContent = target.toFixed(2);
+  };
+  el.textContent = (0).toFixed(2);
+  requestAnimationFrame(step);
+}
+
+function onStandingsShown_() {
+  const shell = document.querySelector('[data-view="standings"] .st-shell');
+  if (!shell) return;
+  const reduced = recapPrefersReducedMotion_();
+  if (!state.standingsIntroPlayed) {
+    state.standingsIntroPlayed = true;
+    if (!reduced) {
+      shell.classList.remove('is-intro');
+      void shell.offsetWidth;
+      shell.classList.add('is-intro');
+      shell.querySelectorAll('[data-count]').forEach((el, i) => stCountUp_(el, parseFloat(el.dataset.count), 600, (i % 6) * 35));
+      window.setTimeout(() => shell.classList.remove('is-intro'), 1500);
+    }
+  }
+  if (state.standingsSlide) { stSlideFrom_(state.standingsSlide); state.standingsSlide = null; }
+  stScheduleFlashClear_();
+  stSaveBaseline_();
+  if ((state.stSection || 'standings') === 'bracket') onBracketShown_();
+}
+
+/* ---------- bracket ---------- */
+// Fixed 10-team bracket (as drawn by ESPN): round 1 = 7v10 and 8v9, seeds 1-6 have byes.
+const ST_R1 = [[1], [8, 9], [5], [4], [6], [3], [7, 10], [2]];
+
+function stBracketOk_(model) { return model.playoffTeams === 10 && model.seedSource !== 'none' && model.bySeed.size === 10; }
+
+function stPathSteps_(model, row) {
+  if (!row || row.seed == null) return null;
+  const seed = row.seed;
+  const nm = s => escapeHtml(model.bySeed.get(s).teamName);
+  const idx = ST_R1.findIndex(group => group.includes(seed));
+  const group = ST_R1[idx];
+  const describe = gi => { const g = ST_R1[gi]; return g.length === 1 ? nm(g[0]) : `the winner of ${g[0]} vs ${g[1]} (${g.map(nm).join(' or ')})`; };
+  const opp = group.find(s => s !== seed);
+  const o = (idx >> 1) ^ 1, third = [o * 2, o * 2 + 1].flatMap(i => ST_R1[i]);
+  const oh = (idx >> 2) ^ 1, fourth = [0, 1, 2, 3].flatMap(k => ST_R1[oh * 4 + k]);
+  const regular = Number(state.league && state.league.regularSeasonWeeks || 14);
+  return [
+    { wk: `Week ${regular + 1}`, txt: group.length === 1 ? 'Bye' : `vs ${nm(opp)} (seed ${opp})` },
+    { wk: `Week ${regular + 2}`, txt: `vs ${describe(idx ^ 1)}` },
+    { wk: `Week ${regular + 3}`, txt: `Could face ${third.map(nm).join(', ')}` },
+    { wk: `Week ${regular + 4}`, txt: `Championship vs the winner of the ${oh ? 'bottom' : 'top'} half (${fourth.length} teams left there)` }
+  ];
+}
+
+function stPathBarHtml_(model) {
+  const row = model.rows.find(r => Number(r.teamId) === Number(state.stPickId));
+  const steps = row && stPathSteps_(model, row);
+  if (!steps) return '<div class="st-hint">Tap a team to trace its route to the championship.</div>';
+  return `<div class="st-pathbar" aria-live="polite"><div class="st-ph"><b>${escapeHtml(row.teamName)}</b><span>seed ${row.seed}, path to the title</span><button type="button" class="st-clear" data-st-clear="1">Clear</button></div><ol>${steps.map(s => `<li><span>${s.wk}</span>${s.txt}</li>`).join('')}</ol></div>`;
+}
+
+function stBkTeam_(model, seed) {
+  const row = model.bySeed.get(seed);
+  return `<button type="button" class="st-bk-t" data-st-pick="${row.teamId}" aria-label="Trace ${escapeAttr(row.teamName)}'s path">${stSeedChipHtml_(model, row, 'st-sm')}${awardsLogoHtml_(row.team, 'st-logo-bk')}<span class="st-bk-nm"><strong>${escapeHtml(row.teamName)}</strong><small>${stRecord_(row)}</small></span></button>`;
+}
+function stBkGhost_(text) { return `<div class="st-bk-t is-ghost"><span class="st-seedchip is-ghost st-sm"></span><span class="wa-logo st-logo-bk is-ghost"></span><span class="st-bk-nm"><strong>${escapeHtml(text)}</strong></span></div>`; }
+
+function renderStandingsBracket_(model) {
+  const box = document.getElementById('stBracket');
+  if (!box) return;
+  model = model || state.standingsModel;
+  if (!stBracketOk_(model)) {
+    box.innerHTML = '<div class="st-empty"><strong>The bracket appears after week 1.</strong><span>Once teams have played, ESPN\'s playoff seeds fill in here.</span></div>';
+    return;
+  }
+  const regular = Number(state.league && state.league.regularSeasonWeeks || 14), w1 = regular + 1, finalWeek = regular + 4;
+  const champ = model.rows.find(r => r.defendingChampion);
+  const t = s => stBkTeam_(model, s);
+  const bye = '<div class="st-bk-bye">Bye, advances to week ' + (w1 + 1) + '</div>';
+
+  const r1 = ST_R1.map((g, i) => `<div class="st-mc" data-id="a${i}" style="grid-row:${i + 1}">${g.length === 1 ? t(g[0]) + bye : t(g[0]) + t(g[1])}</div>`).join('');
+  const r2def = [[['t', 1], ['g', 'Winner of seed 8 / 9']], [['t', 5], ['t', 4]], [['t', 6], ['t', 3]], [['g', 'Winner of seed 7 / 10'], ['t', 2]]];
+  const cell = x => x[0] === 't' ? t(x[1]) : stBkGhost_(x[1]);
+  const r2 = r2def.map((p, i) => `<div class="st-mc" data-id="b${i}" data-from="a${2 * i},a${2 * i + 1}" style="grid-row:${2 * i + 1} / span 2">${cell(p[0]) + cell(p[1])}</div>`).join('');
+  const r3def = [['Winner of 1 vs 8 / 9', 'Winner of 4 vs 5'], ['Winner of 6 vs 3', 'Winner of 2 vs 7 / 10']];
+  const r3 = r3def.map((p, i) => `<div class="st-mc" data-id="c${i}" data-from="b${2 * i},b${2 * i + 1}" style="grid-row:${4 * i + 1} / span 4">${stBkGhost_(p[0]) + stBkGhost_(p[1])}</div>`).join('');
+  const r4 = `<div class="st-mc is-final" data-id="d0" data-from="c0,c1" style="grid-row:1 / span 8"><div class="st-final-h">${awardsIcon_('trophy')}<span>Zenni League champion</span></div>${stBkGhost_('Winner of the top half')}${stBkGhost_('Winner of the bottom half')}</div>`;
+  const col = (name, week, body) => `<div class="st-rd"><h4><b>${name}</b><span>Week ${week}</span></h4><div class="st-slots">${body}</div></div>`;
+
+  // Phone: one round at a time.
+  const R = state.stRound || 1;
+  const pills = [[1, 'Round 1', w1], [2, 'Round 2', w1 + 1], [3, 'Round 3', w1 + 2], [4, 'Final', finalWeek]]
+    .map(p => `<button type="button" class="st-pill ${R === p[0] ? 'is-active' : ''}" data-st-round="${p[0]}" aria-pressed="${R === p[0]}">${p[1]}<small>Week ${p[2]}</small></button>`).join('');
+  const card = (inner, note) => `<div class="st-pm">${inner}${note ? `<div class="st-pm-note">${note}</div>` : ''}</div>`;
+  let phone = '';
+  if (R === 1) {
+    phone = [[8, 9, `Winner plays seed 1 in week ${w1 + 1}`], [7, 10, `Winner plays seed 2 in week ${w1 + 1}`]].map(g => card(t(g[0]) + t(g[1]), g[2])).join('') +
+      [[1, 'the 8 / 9 winner'], [5, 'seed 4'], [4, 'seed 5'], [6, 'seed 3'], [3, 'seed 6'], [2, 'the 7 / 10 winner']].map(b => card(t(b[0]) + `<div class="st-bk-bye">Bye, then plays ${b[1]} in week ${w1 + 1}</div>`)).join('');
+  } else if (R === 2) {
+    phone = r2def.map(p => card(cell(p[0]) + cell(p[1]))).join('');
+  } else if (R === 3) {
+    phone = r3def.map(p => card(stBkGhost_(p[0]) + stBkGhost_(p[1]))).join('');
+  } else {
+    phone = `<div class="st-pm is-final"><div class="st-final-h">${awardsIcon_('trophy')}<span>Zenni League champion</span></div>${stBkGhost_('Winner of the top half')}${stBkGhost_('Winner of the bottom half')}</div>`;
+  }
+
+  box.innerHTML = `
+    <div class="st-bk-wrap">
+      <div class="st-bk-title"><h3>Projected playoff bracket</h3><span>If the season ended today${model.seedSource === 'espn' ? ", using ESPN's seeds" : ''}. Seeds 1 to ${stByes_(10)} get a round 1 bye.</span></div>
+      <div id="stPathBar">${stPathBarHtml_(model)}</div>
+      <div class="st-bk st-bk-pc" id="stBk"><svg class="st-conn" id="stConn" aria-hidden="true"></svg>${col('Round 1', w1, r1)}${col('Round 2', w1 + 1, r2)}${col('Round 3', w1 + 2, r3)}${col('Championship', finalWeek, r4)}</div>
+      <div class="st-bk-phone"><div class="st-pills">${pills}</div>${phone}</div>
+      ${champ ? `<div class="st-champnote">${stCrownSvg_()} Defending champion: ${escapeHtml(champ.teamName)}${champ.seed ? `, currently the ${champ.seed} seed` : ', currently outside the playoff field'}.</div>` : ''}
+    </div>`;
+  if (stIsVisible_() && (state.stSection === 'bracket')) requestAnimationFrame(() => requestAnimationFrame(() => { stDrawConnectors_(); stApplyTrace_(false); }));
+}
+
+function stDrawConnectors_() {
+  const bk = document.getElementById('stBk'), svg = document.getElementById('stConn');
+  if (!bk || !svg || bk.offsetWidth === 0) return;
+  const pos = el => { let x = 0, y = 0; while (el && el !== bk) { x += el.offsetLeft; y += el.offsetTop; el = el.offsetParent; } return { x, y }; };
+  const find = id => bk.querySelector(`[data-id="${id}"]`);
+  svg.setAttribute('viewBox', `0 0 ${bk.offsetWidth} ${bk.offsetHeight}`);
+  let paths = '';
+  bk.querySelectorAll('[data-from]').forEach(target => {
+    const tp = pos(target), ty = tp.y + target.offsetHeight / 2, tx = tp.x;
+    target.dataset.from.split(',').forEach(fromId => {
+      const from = find(fromId); if (!from) return;
+      const fp = pos(from), fx = fp.x + from.offsetWidth, fy = fp.y + from.offsetHeight / 2, mx = fx + (tx - fx) / 2;
+      paths += `<path class="st-base" data-f="${fromId}" data-t="${target.dataset.id}" d="M${fx} ${fy}H${mx}V${ty}H${tx}"/>`;
+    });
+  });
+  svg.innerHTML = paths;
+}
+
+function stApplyTrace_(animate) {
+  const bk = document.getElementById('stBk'), svg = document.getElementById('stConn');
+  if (!bk || !svg) return;
+  const model = state.standingsModel;
+  bk.querySelectorAll('.st-mc.is-on').forEach(el => el.classList.remove('is-on'));
+  document.querySelectorAll('#stBracket .st-bk-t.is-picked').forEach(el => el.classList.remove('is-picked'));
+  svg.querySelectorAll('path.st-hl').forEach(p => p.remove());
+  const row = model && model.rows.find(r => Number(r.teamId) === Number(state.stPickId));
+  if (!row || row.seed == null) { bk.classList.remove('is-tracing'); return; }
+  bk.classList.add('is-tracing');
+  const idx = ST_R1.findIndex(g => g.includes(row.seed));
+  const ids = ['a' + idx, 'b' + (idx >> 1), 'c' + (idx >> 2), 'd0'];
+  ids.forEach(id => { const el = bk.querySelector(`[data-id="${id}"]`); if (el) el.classList.add('is-on'); });
+  document.querySelectorAll(`#stBracket .st-bk-t[data-st-pick="${row.teamId}"]`).forEach(el => el.classList.add('is-picked'));
+  for (let i = 0; i < 3; i++) {
+    const base = svg.querySelector(`path[data-f="${ids[i]}"][data-t="${ids[i + 1]}"]`);
+    if (!base) continue;
+    const hl = base.cloneNode(); hl.setAttribute('class', 'st-hl'); svg.appendChild(hl);
+    if (animate && !recapPrefersReducedMotion_()) {
+      const len = hl.getTotalLength();
+      hl.style.strokeDasharray = len;
+      hl.animate([{ strokeDashoffset: len }, { strokeDashoffset: 0 }], { duration: 520, delay: i * 170, easing: 'ease-out', fill: 'backwards' }).onfinish = () => { hl.style.strokeDasharray = 'none'; };
+    }
+  }
+}
+
+function stRefreshPathBar_() {
+  const bar = document.getElementById('stPathBar');
+  if (bar && state.standingsModel) bar.innerHTML = stPathBarHtml_(state.standingsModel);
+}
+
+function onBracketShown_() {
+  const model = state.standingsModel;
+  if (!model || !stBracketOk_(model)) return;
+  const firstTime = !state.stBracketIntro;
+  state.stBracketIntro = true;
+  if (firstTime && state.stPickId == null) { const mine = getMyTeamId_(); if (mine) state.stPickId = mine; }
+  stRefreshPathBar_();
+  requestAnimationFrame(() => requestAnimationFrame(() => { stDrawConnectors_(); stApplyTrace_(firstTime); }));
+}
+
+function setStandingsSection_(section) {
+  const next = section === 'bracket' ? 'bracket' : 'standings';
+  state.stSection = next;
+  document.querySelectorAll('[data-st-section]').forEach(tab => {
+    const on = tab.dataset.stSection === next;
+    tab.classList.toggle('is-active', on);
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+  });
+  document.querySelectorAll('[data-st-panel]').forEach(panel => { panel.hidden = panel.dataset.stPanel !== next; });
+  if (next === 'bracket') onBracketShown_();
+}
+
+function bindStandings_() {
+  const tabs = document.getElementById('stTabs');
+  if (tabs) {
+    tabs.addEventListener('click', event => { const tab = event.target.closest('[data-st-section]'); if (tab) setStandingsSection_(tab.dataset.stSection); });
+    tabs.addEventListener('keydown', event => {
+      if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+      const list = Array.from(tabs.querySelectorAll('[data-st-section]'));
+      let i = list.indexOf(document.activeElement); if (i < 0) i = list.findIndex(t => t.classList.contains('is-active'));
+      if (event.key === 'ArrowRight') i = (i + 1) % list.length; else if (event.key === 'ArrowLeft') i = (i - 1 + list.length) % list.length; else if (event.key === 'Home') i = 0; else i = list.length - 1;
+      event.preventDefault(); list[i].focus();
+    });
+  }
+  const grid = document.getElementById('stConfGrid');
+  if (grid) grid.addEventListener('click', event => {
+    const row = event.target.closest('.st-row');
+    if (row) openTeamModal(Number(row.dataset.teamId));
+  });
+  const bracket = document.getElementById('stBracket');
+  if (bracket) bracket.addEventListener('click', event => {
+    const pick = event.target.closest('[data-st-pick]');
+    if (pick) { const id = Number(pick.dataset.stPick); state.stPickId = Number(state.stPickId) === id ? null : id; stRefreshPathBar_(); stApplyTrace_(true); return; }
+    if (event.target.closest('[data-st-clear]')) { state.stPickId = null; stRefreshPathBar_(); stApplyTrace_(false); return; }
+    const round = event.target.closest('[data-st-round]');
+    if (round) { state.stRound = Number(round.dataset.stRound); renderStandingsBracket_(state.standingsModel); stRefreshPathBar_(); }
+  });
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(() => { if (stIsVisible_() && state.stSection === 'bracket') { stDrawConnectors_(); stApplyTrace_(false); } }, 150);
+  });
+}
+
 
 function renderTeamGallery() {
   const grid = document.getElementById('teamGrid');

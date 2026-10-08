@@ -264,52 +264,62 @@
       </section>
 
       <section class="view-panel awards-view" data-view="awards">
-        <section class="section-block weekly-awards-shell">
-          <div class="section-heading weekly-awards-heading">
-            <div>
-              <span class="section-kicker">Zenni Weekly Honors</span>
-              <h2>Weekly Awards</h2>
-              <p>Go back through every week for player leaders, team of the week, biggest win, closest battle and shootout.</p>
+        <section class="section-block weekly-awards-shell wa-shell">
+          <header class="wa-hero" aria-label="Weekly Awards spotlight">
+            <div class="wa-hero-copy">
+              <span class="wa-eyebrow">ZENNI LEAGUE · 2026 SEASON</span>
+              <h2>WEEKLY <em>AWARDS</em></h2>
+              <p class="wa-hero-subtitle">The week's best performances. Real ESPN starter points and league results.</p>
             </div>
-            <div class="week-selector awards-week-selector">
-              <button type="button" class="week-button" id="awardsPrevWeek" aria-label="Previous awards week">‹</button>
-              <div><span>Week</span><strong id="awardsWeekLabel">1</strong></div>
-              <button type="button" class="week-button" id="awardsNextWeek" aria-label="Next awards week">›</button>
+            <div class="wa-spotlight is-plain" id="awardsPlayerSpotlight" aria-live="polite">
+              <div class="wa-spot-copy">
+                <span class="wa-spotlight-kicker">★ WEEK 1</span>
+                <strong>Loading weekly leader…</strong>
+                <span class="wa-spot-sub">Waiting for ESPN starter data</span>
+              </div>
             </div>
+          </header>
+
+          <div class="wa-controlbar" id="awardsControlBar">
+            <div class="wa-weekstrip" id="awardsWeekStrip" role="group" aria-label="Choose awards week">
+              <span class="wa-weekstrip-label">WEEK</span>
+              <div class="wa-pills" id="awardsWeekPills"></div>
+            </div>
+            <div class="wa-seasonnote" id="awardsSeasonNote" hidden><b>SEASON-WIDE</b><span class="wa-note-long"> Records span every week played ·</span> <span id="awardsSeasonNoteWeek">through Week 1</span></div>
+            <span class="wa-chip" id="awardsWeekStatus">ESPN weekly results</span>
+            <span class="wa-chip" id="awardsSeasonChip" hidden>2026 SEASON</span>
+            <span class="wa-sr" id="awardsWeekLabel" aria-live="polite">1</span>
           </div>
 
-          <div class="weekly-awards-grid">
-            <section class="feature-card top-stats-card top-performers-card awards-performers-card">
+          <div class="wa-tab-bar" role="tablist" aria-label="Weekly Awards sections" id="awardsSectionTabs">
+            <button type="button" class="wa-tab is-active" id="awardsTab-players" data-awards-section="players" role="tab" aria-selected="true" aria-controls="awardsPlayersPanel"><svg class="wa-tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 17l-5.2 2.7 1-5.9L3.5 9.7l5.9-.8z"/></svg><span>Player Leaders</span></button>
+            <button type="button" class="wa-tab" id="awardsTab-honors" data-awards-section="honors" role="tab" aria-selected="false" aria-controls="awardsHonorsPanel"><svg class="wa-tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 4h8v5a4 4 0 0 1-8 0V4z"/><path d="M8 6H5a1 1 0 0 0-1 1c0 2.2 1.6 4 4 4M16 6h3a1 1 0 0 1 1 1c0 2.2-1.6 4-4 4"/><path d="M12 13v4M8.5 20h7M10 17h4"/></svg><span>Team Honors</span></button>
+            <button type="button" class="wa-tab" id="awardsTab-records" data-awards-section="records" role="tab" aria-selected="false" aria-controls="awardsRecordsPanel"><svg class="wa-tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 19V10M10 19V5M15 19v-7M20 19V8"/></svg><span>Season Records</span></button>
+          </div>
+
+          <div class="wa-section-panel" id="awardsPlayersPanel" data-awards-panel="players" role="tabpanel" aria-labelledby="awardsTab-players">
+            <section class="feature-card top-stats-card top-performers-card awards-performers-card wa-leader-card">
               <div class="section-heading compact-heading performers-heading">
-                <div>
-                  <span class="section-kicker">Weekly Leaders</span>
-                  <h2>Top Performers</h2>
-                  <p class="performers-subtitle">Top 5 starters by position</p>
-                </div>
+                <div><span class="section-kicker">WEEKLY LEADERS</span><h2>Top Performers</h2><p class="performers-subtitle">Top five starters by position · ESPN fantasy points</p></div>
               </div>
               <div class="top-stats-grid performers-grid skeleton-block" id="awardsTopStats"></div>
             </section>
+          </div>
 
-            <article class="feature-card pulse-card command-pulse-card weekly-spotlight-card awards-spotlight-card">
+          <div class="wa-section-panel" id="awardsHonorsPanel" data-awards-panel="honors" role="tabpanel" aria-labelledby="awardsTab-honors" hidden>
+            <article class="feature-card pulse-card command-pulse-card weekly-spotlight-card awards-spotlight-card wa-honors-card">
               <div class="section-heading compact-heading">
-                <div>
-                  <span class="section-kicker">Weekly Spotlight</span>
-                  <h2>Team Performance</h2>
-                </div>
+                <div><span class="section-kicker">WEEKLY SPOTLIGHT</span><h2>Team Honors</h2><p class="performers-subtitle">Highest score, biggest win, closest battle and shootout</p></div>
                 <button class="panel-link" type="button" data-tab-open="battle">View Battles →</button>
               </div>
               <div id="awardsLeaguePulse" class="pulse-list weekly-spotlight-list skeleton-block"></div>
             </article>
           </div>
 
-          <div class="season-records-section">
-            <section class="feature-card top-stats-card top-performers-card all-time-performers-card">
+          <div class="wa-section-panel" id="awardsRecordsPanel" data-awards-panel="records" role="tabpanel" aria-labelledby="awardsTab-records" hidden>
+            <section class="feature-card top-stats-card top-performers-card all-time-performers-card wa-records-card">
               <div class="section-heading compact-heading performers-heading">
-                <div>
-                  <span class="section-kicker">Record Book</span>
-                  <h2>Season Records</h2>
-                  <p class="performers-subtitle">Top 5 single-game starter performances of the 2026 season</p>
-                </div>
+                <div><span class="section-kicker">2026 RECORD BOOK</span><h2>Season Records</h2><p class="performers-subtitle">Top five single-game starter performances of the 2026 season</p></div>
                 <span class="performers-week season-record-chip">2026 Season</span>
               </div>
               <div class="top-stats-grid performers-grid skeleton-block" id="overviewTopStats"></div>
@@ -347,65 +357,30 @@
       </section>
 
       <section class="view-panel" data-view="standings">
-        <section class="section-block standings-view">
-          <div class="section-heading">
-            <div>
-              <span class="section-kicker">Conference Race</span>
-              <h2>Standings</h2>
+        <section class="section-block standings-view st-shell">
+          <header class="st-hero" aria-label="Standings summary">
+            <div class="st-hero-copy">
+              <span class="st-kicker">Zenni League 2026</span>
+              <h2>CONFERENCE <em>STANDINGS</em></h2>
+              <p class="st-sub" id="stSub">Where every team stands, and who is on track for the championship.</p>
             </div>
-            <span class="preseason-note" id="standingsNote">Preseason — rankings begin after Week 1</span>
+            <div class="st-timeline" id="stTimeline"></div>
+          </header>
+          <span class="preseason-note st-sr" id="standingsNote">Preseason — rankings begin after Week 1</span>
+
+          <div class="st-tabs" id="stTabs" role="tablist" aria-label="Standings views">
+            <button type="button" class="st-tab is-active" id="stTab-standings" role="tab" aria-selected="true" aria-controls="stPanel-standings" data-st-section="standings"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 19V10M10 19V5M15 19v-7M20 19V8"/></svg><span>Conference standings</span></button>
+            <button type="button" class="st-tab" id="stTab-bracket" role="tab" aria-selected="false" tabindex="-1" aria-controls="stPanel-bracket" data-st-section="bracket"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 4h8v5a4 4 0 0 1-8 0V4z"/><path d="M8 6H5a1 1 0 0 0-1 1c0 2.2 1.6 4 4 4M16 6h3a1 1 0 0 1 1 1c0 2.2-1.6 4-4 4"/><path d="M12 13v4M8.5 20h7M10 17h4"/></svg><span>Playoff bracket</span></button>
           </div>
 
-          <section class="glance-ribbon" id="glanceRibbon"></section>
+          <div class="st-panel" id="stPanel-standings" role="tabpanel" aria-labelledby="stTab-standings" data-st-panel="standings">
+            <section class="st-insights" id="glanceRibbon" aria-label="League insights"></section>
+            <div class="st-legend" id="stLegend"></div>
+            <div class="st-conf-grid" id="stConfGrid"></div>
+          </div>
 
-          <div class="conference-grid">
-            <article class="standings-card afc-card">
-              <div class="conference-title">
-                <span class="conference-dot"></span>
-                <div>
-                  <span>Zenni</span>
-                  <strong>AFC</strong>
-                </div>
-              </div>
-              <div class="standings-table-wrap">
-                <table class="standings-table">
-                  <thead>
-                    <tr>
-                      <th>RK</th>
-                      <th>Team</th>
-                      <th>W-L-T</th>
-                      <th>PF</th>
-                      <th>STRK</th>
-                    </tr>
-                  </thead>
-                  <tbody id="afcStandings"></tbody>
-                </table>
-              </div>
-            </article>
-
-            <article class="standings-card nfc-card">
-              <div class="conference-title">
-                <span class="conference-dot"></span>
-                <div>
-                  <span>Zenni</span>
-                  <strong>NFC</strong>
-                </div>
-              </div>
-              <div class="standings-table-wrap">
-                <table class="standings-table">
-                  <thead>
-                    <tr>
-                      <th>RK</th>
-                      <th>Team</th>
-                      <th>W-L-T</th>
-                      <th>PF</th>
-                      <th>STRK</th>
-                    </tr>
-                  </thead>
-                  <tbody id="nfcStandings"></tbody>
-                </table>
-              </div>
-            </article>
+          <div class="st-panel" id="stPanel-bracket" role="tabpanel" aria-labelledby="stTab-bracket" data-st-panel="bracket" hidden>
+            <div id="stBracket"></div>
           </div>
         </section>
       </section>
