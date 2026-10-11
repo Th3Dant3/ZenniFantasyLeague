@@ -1424,14 +1424,16 @@ function renderMyTeamStrip_() {
   const opponent = state.teamMap.get(Number(iAmHome ? match.awayTeamId : match.homeTeamId));
   const myScore = Number(iAmHome ? match.homeScore : match.awayScore || 0);
   const theirScore = Number(iAmHome ? match.awayScore : match.homeScore || 0);
-  const status = String(match.status || 'SCHEDULED').toUpperCase();
+  const status = effectiveMatchupStatus_(match) || 'SCHEDULED';
   const summary = getMyWeekSummary_();
 
   const statusHtml = status === 'LIVE'
     ? '<span class="mystrip-status is-live">● LIVE</span>'
     : status === 'FINAL'
       ? '<span class="mystrip-status">FINAL</span>'
-      : '<span class="mystrip-status">Not started</span>';
+      : status === 'IN_PROGRESS'
+        ? '<span class="mystrip-status">In progress</span>'
+        : '<span class="mystrip-status">Not started</span>';
 
   const lastWeekHtml = summary
     ? `<span class="mystrip-last ${summary.result === 'W' ? 'is-win' : summary.result === 'L' ? 'is-loss' : ''}">Your Week ${summary.week}: ${escapeHtml(myResultText_(summary))} · #${summary.rank} of ${summary.teamCount}</span>`
@@ -3028,10 +3030,10 @@ function updateOverviewWeekStatus_() {
   const weekStatus = document.getElementById('heroWeekStatus');
   if (!weekStatus) return;
   const matches = Array.isArray(state.currentMatchups) ? state.currentMatchups : [];
-  const statuses = matches.map(match => String(match && match.status || '').toUpperCase());
+  const statuses = matches.map(match => effectiveMatchupStatus_(match));
   weekStatus.textContent = !statuses.length ? 'Awaiting matchup data' :
     statuses.every(value => value === 'FINAL') ? 'All matchups final' :
-    statuses.some(value => value === 'LIVE') ? 'Matchups in progress' :
+    statuses.some(value => value === 'LIVE' || value === 'IN_PROGRESS') ? 'Matchups in progress' :
     statuses.every(value => value === 'SCHEDULED') ? 'Upcoming matchups' : 'Matchup week active';
 }
 
@@ -3456,7 +3458,7 @@ function getDefaultAwardsWeek_() {
 
 function currentWeekHasPoints_() {
   return (Array.isArray(state.currentMatchups) ? state.currentMatchups : [])
-    .some(match => String(match && match.status || '').toUpperCase() !== 'SCHEDULED');
+    .some(match => effectiveMatchupStatus_(match) !== 'SCHEDULED');
 }
 
 function scheduleSeasonBoard_() {
@@ -4346,13 +4348,13 @@ function renderFeaturedMatchup(matchups, week) {
   `;
 
   container.innerHTML = `
-    ${featuredTeamMarkup(home, featured.homeScore, 'left', featured.status)}
+    ${featuredTeamMarkup(home, featured.homeScore, 'left', effectiveMatchupStatus_(featured))}
     <div class="vs-mark">VS</div>
-    ${featuredTeamMarkup(away, featured.awayScore, 'right', featured.status)}
+    ${featuredTeamMarkup(away, featured.awayScore, 'right', effectiveMatchupStatus_(featured))}
   `;
 
   container.dataset.matchupKey = battleMatchupKey_(featured, week);
-  container.dataset.gameStatus = String(featured.status || 'SCHEDULED').toUpperCase();
+  container.dataset.gameStatus = effectiveMatchupStatus_(featured) || 'SCHEDULED';
 }
 
 function chooseFeaturedMatchup(matchups, week) {
@@ -5306,6 +5308,20 @@ function renderWeekError(error, week) {
 }
 
 // Overview display only. Scheduled scores remain untouched in ESPN state.
+// Code.gs marks a current-week matchup LIVE or FINAL only when ALL of its starters' NFL games agree.
+// After Thursday night (some games final, the rest not started) it stays "SCHEDULED" even though real points
+// are on the board, which used to hide those scores on the Overview. Points on the board = in progress.
+function effectiveMatchupStatus_(match) {
+  const raw = String(match && match.status || '').toUpperCase();
+  const notStarted = raw === '' || raw === 'SCHEDULED' || raw === 'PRE' || raw === 'UPCOMING' || raw === 'NOT_STARTED';
+  const hasPoints = Number(match && match.homeScore || 0) > 0 || Number(match && match.awayScore || 0) > 0;
+  return notStarted && hasPoints ? 'IN_PROGRESS' : raw;
+}
+
+function matchupStatusLabel_(match) {
+  return effectiveMatchupStatus_(match) === 'IN_PROGRESS' ? 'In progress' : ((match && match.status) || 'Scheduled');
+}
+
 function overviewScoreLabel_(score, status) {
   const normalized = String(status || '').toUpperCase();
   if (normalized === 'SCHEDULED' || normalized === 'PRE' || normalized === 'UPCOMING' || normalized === 'NOT_STARTED') {
@@ -5339,13 +5355,13 @@ function renderOverviewMatchups(matchups, week) {
         aria-label="Open FantasyCast for ${escapeAttr(home ? home.name : 'Home')} versus ${escapeAttr(away ? away.name : 'Away')}"
       >
         <div class="overview-matchup-teams">
-          ${overviewMatchupTeamMarkup(home, match.homeScore, 'home', match.status)}
+          ${overviewMatchupTeamMarkup(home, match.homeScore, 'home', effectiveMatchupStatus_(match))}
           <div class="overview-versus">VS</div>
-          ${overviewMatchupTeamMarkup(away, match.awayScore, 'away', match.status)}
+          ${overviewMatchupTeamMarkup(away, match.awayScore, 'away', effectiveMatchupStatus_(match))}
         </div>
         <div class="overview-matchup-footer">
           <span>${escapeHtml(story.tag)}</span>
-          <span>${escapeHtml(match.status || 'Scheduled')}</span>
+          <span>${escapeHtml(matchupStatusLabel_(match))}</span>
         </div>
       </article>
     `;
@@ -5503,7 +5519,7 @@ function battleCardMarkup(match, story, index) {
 
       <div class="battle-status">
         <span>Week ${match.week || state.selectedWeek}</span>
-        <span>${escapeHtml(match.status || 'Scheduled')}</span>
+        <span>${escapeHtml(matchupStatusLabel_(match))}</span>
       </div>
 
       <div class="battle-cast-hint">
@@ -5676,6 +5692,31 @@ const BATTLE_STARTER_SLOT_ORDER = Object.freeze([
   'QB', 'RB', 'RB', 'WR', 'WR', 'TE', 'FLEX', 'FLEX', 'D/ST', 'K'
 ]);
 
+// The roster endpoint can return a FINAL/LIVE player with no points while the matchup and Awards (performance) data
+// have them. For STARTED players only, borrow that player's real points from the performance data so the panel
+// never disagrees with the cards. Players who have not kicked off stay blank.
+async function fillMissingCastPoints_(week, sides) {
+  const started = player => ['LIVE', 'IN_PROGRESS', 'FINAL', 'POST'].includes(battlePlayerGameStatus_(player));
+  const needs = sides.some(side => side.roster.some(player => started(player) && battlePlayerActualPoints_(player) == null));
+  if (!needs) return;
+  try {
+    const performance = await getWeekPerformance_(week);
+    const byTeam = new Map(performanceSnapshots_(performance).map(snapshot => [Number(snapshot.team.id), snapshot.roster || []]));
+    sides.forEach(side => {
+      const source = new Map((byTeam.get(Number(side.teamId)) || []).map(player => [Number(player.playerId), getWeeklyPlayerPoints(player, week)]));
+      side.roster.forEach(player => {
+        if (!started(player) || battlePlayerActualPoints_(player) != null) return;
+        const value = source.get(Number(player.playerId));
+        if (value != null && Number.isFinite(Number(value))) { player.fantasyPoints = Number(value); player.pointsSource = 'performance'; }
+      });
+      const total = normalizeBattleLineup_(side.roster).starters.filter(Boolean).reduce((sum, player) => sum + (battlePlayerActualPoints_(player) || 0), 0);
+      if (side.data && (!Number.isFinite(Number(side.data.teamFantasyPoints)) || total > Number(side.data.teamFantasyPoints))) side.data.teamFantasyPoints = Math.round(total * 100) / 100;
+    });
+  } catch (error) {
+    console.warn('FantasyCast could not borrow player points from the performance data:', error);
+  }
+}
+
 async function loadBattleFantasyCast_(force = false) {
   if (state.activeView !== 'battle' || state.battleCastLoading || !state.battleCastOpen) return;
 
@@ -5767,6 +5808,18 @@ async function loadBattleFantasyCast_(force = false) {
     const homeRoster = Array.isArray(homeData && homeData.roster) ? homeData.roster : [];
     const awayRoster = Array.isArray(awayData && awayData.roster) ? awayData.roster : [];
 
+    await fillMissingCastPoints_(week, [
+      { teamId: homeId, roster: homeRoster, data: homeData },
+      { teamId: awayId, roster: awayRoster, data: awayData }
+    ]);
+    if (
+      requestSeq !== state.battleCastRequestSeq ||
+      !state.battleCastOpen ||
+      state.battleCastSelectedKey !== selectionKey
+    ) {
+      return;
+    }
+
     detectCastPlays_(week, selected, homeRoster, awayRoster);
 
     state.battleCastCache.set(cacheKey, {
@@ -5840,7 +5893,9 @@ function battleStarterStatusSummary_(homeRoster, awayRoster) {
   const hasLive = statuses.some(status => status === 'LIVE' || status === 'IN_PROGRESS');
   const hasUpcoming = statuses.some(status => status === 'PRE' || status === 'SCHEDULED' || status === 'UPCOMING' || !status);
   const complete = statuses.length > 0 && statuses.every(status => status === 'FINAL' || status === 'POST');
-  return { starters, statuses, hasLive, hasUpcoming, complete };
+  // Some starters finished and others have not kicked off (e.g. after Thursday night): the matchup IS under way.
+  const anyStarted = statuses.some(status => ['LIVE', 'IN_PROGRESS', 'FINAL', 'POST'].includes(status));
+  return { starters, statuses, hasLive, hasUpcoming, complete, anyStarted };
 }
 
 function shouldShowFantasyCast_(match, homeRoster, awayRoster) {
@@ -5857,6 +5912,7 @@ function battleFantasyCastModeLabel_(homeRoster, awayRoster) {
   const summary = battleStarterStatusSummary_(homeRoster, awayRoster);
   if (summary.hasLive) return 'LIVE FANTASYCAST';
   if (summary.complete) return 'COMPLETED FANTASYCAST';
+  if (summary.anyStarted) return 'FANTASYCAST';
   return 'FANTASYCAST PREVIEW';
 }
 
@@ -5875,16 +5931,15 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
   const awayProjection = Number.isFinite(Number(awayData && awayData.teamProjectedPoints))
     ? Number(awayData.teamProjectedPoints)
     : rosterProjectionTotal_(awayLineup.starters);
-  const homeScore = Number.isFinite(Number(homeData && homeData.teamFantasyPoints))
-    ? Number(homeData.teamFantasyPoints)
-    : Number(match.homeScore || 0);
-  const awayScore = Number.isFinite(Number(awayData && awayData.teamFantasyPoints))
-    ? Number(awayData.teamFantasyPoints)
-    : Number(match.awayScore || 0);
+  // The roster total can miss players the matchup endpoint already counted (it showed 0.00 next to a 38.25 card).
+  // Both are ESPN values, so show the larger and let the two views agree.
+  const homeScore = Math.max(Number.isFinite(Number(homeData && homeData.teamFantasyPoints)) ? Number(homeData.teamFantasyPoints) : 0, Number(match.homeScore || 0));
+  const awayScore = Math.max(Number.isFinite(Number(awayData && awayData.teamFantasyPoints)) ? Number(awayData.teamFantasyPoints) : 0, Number(match.awayScore || 0));
   const chance = battleWinChance_(homeScore, awayScore, homeProjection, awayProjection);
   const starterStatus = battleStarterStatusSummary_(homeRoster, awayRoster);
   const hasLive = starterStatus.hasLive;
   const isComplete = starterStatus.complete;
+  const anyStarted = starterStatus.anyStarted;
 
   container.innerHTML = `
     <div class="fantasycast-shell">
@@ -5895,7 +5950,7 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
         </div>
 
         <div class="fantasycast-topbar-actions">
-          <span>WEEK ${week} · ${isComplete ? 'COMPLETED' : hasLive ? 'LIVE · AUTO REFRESH 60 SEC' : 'SCHEDULED · AUTO REFRESH 60 SEC'}</span>
+          <span>WEEK ${week} · ${isComplete ? 'COMPLETED' : hasLive ? 'LIVE · AUTO REFRESH 60 SEC' : anyStarted ? 'IN PROGRESS · AUTO REFRESH 60 SEC' : 'SCHEDULED · AUTO REFRESH 60 SEC'}</span>
           <button type="button" class="fantasycast-refresh-button" data-fantasycast-refresh aria-label="Refresh FantasyCast now">
             <span>Refresh</span>
             <strong>↻</strong>
@@ -5908,12 +5963,12 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
       </div>
 
       <div class="fantasycast-scoreboard">
-        ${fantasyCastTeamHeader_(home, homeScore, homeProjection, 'left')}
+        ${fantasyCastTeamHeader_(home, homeScore, homeProjection, 'left', castTeamPerformance_(homeLineup.starters, homeScore))}
         <div class="fantasycast-center">
           <span>${isComplete ? 'FINAL' : 'CHANCE TO WIN'}</span>
           <strong>${isComplete ? `${number2(homeScore)} <em>VS</em> ${number2(awayScore)}` : `${chance.home}% <em>VS</em> ${chance.away}%`}</strong>
         </div>
-        ${fantasyCastTeamHeader_(away, awayScore, awayProjection, 'right')}
+        ${fantasyCastTeamHeader_(away, awayScore, awayProjection, 'right', castTeamPerformance_(awayLineup.starters, awayScore))}
       </div>
 
       <div class="fantasycast-winbar" aria-label="Chance to win">
@@ -5969,14 +6024,14 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
   updateBattleCastSelectionUi_();
 }
 
-function fantasyCastTeamHeader_(team, score, projection, side) {
+function fantasyCastTeamHeader_(team, score, projection, side, perf) {
   return `
     <div class="fantasycast-team fantasycast-team-${side}">
       <img class="${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
       <div>
         <strong>${escapeHtml(team ? team.name : 'Unknown Team')}</strong>
         <span>${escapeHtml(team ? ownerText(team) : '')}</span>
-        <div class="fantasycast-score">${number2(score)}</div>
+        <div class="fantasycast-score${perf ? ` perf-${perf.tier}` : ''}"${perf ? ` title="${escapeAttr(`${perf.delta >= 0 ? '+' : '−'}${Math.abs(perf.delta).toFixed(1)} vs about ${perf.expected.toFixed(1)} projected by now`)}"` : ''}>${number2(score)}</div>${perf ? `<span class="fc-sr">team ${castPerfWords_(perf, true)}</span>` : ''}
         <small>${projection > 0 ? `PROJ ${projection.toFixed(1)}` : 'PROJECTION PENDING'}</small>
       </div>
     </div>
@@ -6046,6 +6101,8 @@ function fantasyCastPlayer_(player, side) {
 
   const actual = battlePlayerActualPoints_(player);
   const projection = battlePlayerProjection_(player);
+  const perf = castPlayerPerformance_(player);
+  const isLiveGame = perf && perf.progress != null && perf.progress < 1;
   const status = battlePlayerStatusLabel_(player);
   const opponent = battlePlayerOpponent_(player);
   const injury = String(player.injuryStatus || '').toUpperCase();
@@ -6062,8 +6119,8 @@ function fantasyCastPlayer_(player, side) {
         <small class="${status.className}">${escapeHtml(status.text)}</small>
       </div>
       <div class="fantasycast-player-score">
-        <strong>${actual == null ? '--' : actual.toFixed(1)}</strong>
-        <span>${projection == null ? 'PROJ --' : `PROJ ${projection.toFixed(1)}`}</span>
+        <strong${perf ? ` class="perf-${perf.tier}" title="${escapeAttr(castPerfTitle_(perf, projection, actual))}"` : (actual == null && ['LIVE', 'IN_PROGRESS', 'FINAL', 'POST'].includes(battlePlayerGameStatus_(player)) ? ' title="ESPN has not reported this player\'s points yet"' : '')}>${actual == null ? '--' : actual.toFixed(1)}</strong>
+        <span>${projection == null ? 'PROJ --' : `PROJ ${projection.toFixed(1)}`}</span>${perf ? `<span class="fc-sr">${castPerfWords_(perf, isLiveGame)}</span>` : ''}
       </div>
     </div>
   `;
@@ -6093,6 +6150,78 @@ function battlePlayerProjection_(player) {
     }
   }
   return null;
+}
+
+/* ---------- FantasyCast: performance vs projection (green above / neutral on track / red below) ---------- */
+// "On track" is a BAND around the projection, not a single number: the larger of 2 points or 15% of the projection.
+const CAST_TOLERANCE_MIN = 2;
+const CAST_TOLERANCE_PCT = 0.15;
+function castTolerance_(projection) { return Math.max(CAST_TOLERANCE_MIN, Math.abs(projection) * CAST_TOLERANCE_PCT); }
+
+// Share of a game that has been played (0..1), from the live quarter and clock. null = in progress but unknown.
+function castGameProgress_(player) {
+  const status = battlePlayerGameStatus_(player);
+  if (status === 'FINAL' || status === 'POST') return 1;
+  if (status !== 'LIVE' && status !== 'IN_PROGRESS') return 0;
+  const period = Number(player.period || player.quarter || 0);
+  if (!(period >= 1)) return null;
+  if (period >= 5) return 1;                                  // overtime: regulation is complete
+  const clock = String(player.gameClock || player.clock || '').split(':');
+  const left = clock.length === 2 ? Number(clock[0]) * 60 + Number(clock[1]) : Number(clock[0]);
+  if (!Number.isFinite(left)) return null;
+  const elapsed = (period - 1) * 900 + (900 - Math.min(900, Math.max(0, left)));
+  return Math.min(1, Math.max(0, elapsed / 3600));
+}
+
+// Dynamic: the bar a live player is measured against rises as the game goes on (projection x share played).
+function castPerformance_(actual, projection, progress) {
+  if (actual == null || projection == null || !(projection > 0)) return null;
+  const tolerance = castTolerance_(projection);
+  if (progress == null) {
+    // In progress but no clock: only celebrate a player who has ALREADY beaten the whole projection; never show red.
+    const delta = actual - projection;
+    return { tier: delta >= tolerance ? 'above' : 'even', delta, expected: projection, progress: null, tolerance };
+  }
+  if (!(progress > 0)) return null;                           // not started
+  const expected = projection * progress;
+  const delta = actual - expected;
+  return { tier: delta > tolerance ? 'above' : delta < -tolerance ? 'below' : 'even', delta, expected, progress, tolerance };
+}
+
+function castPlayerPerformance_(player) {
+  return castPerformance_(battlePlayerActualPoints_(player), battlePlayerProjection_(player), castGameProgress_(player));
+}
+
+// Same idea for the whole team: total so far vs what its started starters were projected to have by now.
+function castTeamPerformance_(starters, score) {
+  let expected = 0;
+  (starters || []).filter(Boolean).forEach(player => {
+    const projection = battlePlayerProjection_(player);
+    if (projection == null || !(projection > 0)) return;
+    const progress = castGameProgress_(player);
+    if (progress === 0) return;                               // has not kicked off: nothing expected yet
+    if (progress == null) { expected += battlePlayerActualPoints_(player) || 0; return; }   // unknown pace: neutral
+    expected += projection * progress;
+  });
+  if (!(expected > 0)) return null;
+  const tolerance = Math.max(5, expected * 0.10);
+  const delta = Number(score) - expected;
+  return { tier: delta > tolerance ? 'above' : delta < -tolerance ? 'below' : 'even', delta, expected, tolerance };
+}
+
+function castPerfWords_(perf, live) {
+  if (!perf) return '';
+  const phrases = live
+    ? { above: 'ahead of pace', below: 'behind pace', even: 'on pace' }
+    : { above: 'above projection', below: 'below projection', even: 'near projection' };
+  return phrases[perf.tier];
+}
+function castPerfTitle_(perf, projection, actual) {
+  if (!perf) return '';
+  const sign = perf.delta >= 0 ? '+' : '−';
+  if (perf.progress == null) return perf.tier === 'above' ? `Already above the full projection of ${projection.toFixed(1)}` : `In progress. Projection ${projection.toFixed(1)}`;
+  if (perf.progress >= 1) return `${sign}${Math.abs(perf.delta).toFixed(1)} vs projection of ${projection.toFixed(1)}`;
+  return `${actual.toFixed(1)} so far vs about ${perf.expected.toFixed(1)} expected by now (${sign}${Math.abs(perf.delta).toFixed(1)}). Projection ${projection.toFixed(1)}`;
 }
 
 function rosterProjectionTotal_(starters) {

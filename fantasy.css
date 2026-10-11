@@ -7764,3 +7764,13 @@ tr.is-mine .standing-name strong { color: var(--gold-2); }
   [data-view="standings"] .st-pm-note { padding:8px 12px; border-top:1px solid #1d3550; background:rgba(75,181,255,.07); font-size:12px; color:#9fd2ff; }
   [data-view="standings"] .st-pm.is-final { border:1.5px solid #f5b728; background:linear-gradient(180deg,#14283f,#0d1d31); }
 }
+
+/* =========================================================
+   FantasyCast: performance vs projection (green above, red below, neutral near). Color is never the only cue.
+   ========================================================= */
+#battleFantasyCast .perf-above { color: #4bd384; }
+#battleFantasyCast .perf-below { color: #ff6b7e; }
+#battleFantasyCast .perf-above::after, #battleFantasyCast .perf-below::after { margin-left: .22em; font: 700 .4em/1 Inter, system-ui, sans-serif; vertical-align: .75em; }
+#battleFantasyCast .perf-above::after { content: "\25B2"; }
+#battleFantasyCast .perf-below::after { content: "\25BC"; }
+#battleFantasyCast .fc-sr { position: absolute !important; display: block; width: 1px; height: 1px; margin: 0 !important; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
