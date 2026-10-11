@@ -7774,3 +7774,1127 @@ tr.is-mine .standing-name strong { color: var(--gold-2); }
 #battleFantasyCast .perf-above::after { content: "\25B2"; }
 #battleFantasyCast .perf-below::after { content: "\25BC"; }
 #battleFantasyCast .fc-sr { position: absolute !important; display: block; width: 1px; height: 1px; margin: 0 !important; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+
+/* =========================================================
+   BATTLE CENTER v2
+   Hero, Match of the Week spotlight, "All matchups" list and the
+   FantasyCast panel, rebuilt to match the approved mockup.
+   Everything is scoped to .battle-center so no other tab changes.
+   Remove this block (and restore the old markup) to roll back.
+   ========================================================= */
+
+.battle-center {
+  --bc-line: #223853;
+  --bc-card: linear-gradient(180deg, #102239, #0a1829);
+  --bc-hero-art: url('overview-stadium.jpg');
+  --bc-blue: #3a6fa8;
+  padding-top: 18px;
+}
+
+/* ---------- hero ---------- */
+.battle-center .battle-hero {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 0;
+  padding: 20px 28px;
+  border: 1px solid rgba(255,198,41,.43);
+  border-radius: 20px;
+  background:
+    linear-gradient(90deg, rgba(4,13,27,.97) 0%, rgba(6,19,37,.86) 55%, rgba(7,17,33,.45) 100%),
+    var(--bc-hero-art) center 42% / cover no-repeat,
+    linear-gradient(135deg, #0b192b, #08101b);
+  box-shadow: none;
+}
+
+.battle-center .battle-hero::before {
+  display: none;
+}
+
+.battle-center .battle-hero::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  top: auto;
+  right: 0;
+  left: 0;
+  width: auto;
+  height: 3px;
+  opacity: 1;
+  transform: none;
+  background: linear-gradient(90deg, transparent, #f5b923, #ffe08c, transparent);
+}
+
+.battle-center .battle-hero h1 {
+  margin: 0;
+  font: 800 56px/.95 "Barlow Condensed", sans-serif;
+  letter-spacing: .012em;
+  text-shadow: none;
+}
+
+.battle-center .battle-hero h1 em {
+  font-style: normal;
+  color: #ffd15b;
+}
+
+.battle-center .battle-hero p {
+  max-width: none;
+  margin: 8px 0 0;
+  color: #b8c8db;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.battle-center .battle-week-control {
+  min-width: 0;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.battle-center .battle-week-button {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid #2b4463;
+  border-radius: 12px;
+  background: #0d2339;
+  color: #c5d5e7;
+  font: 800 20px/42px Inter, system-ui, sans-serif;
+  text-align: center;
+}
+
+.battle-center .battle-week-control > div {
+  min-width: 104px;
+}
+
+.battle-center .battle-week-control > div span {
+  color: #8ea3bb;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.battle-center .battle-week-control > div strong {
+  margin: 0;
+  font: 800 30px/1 "Barlow Condensed", sans-serif;
+}
+
+.battle-center .battle-week-control .battle-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid #2a4260;
+  border-radius: 99px;
+  background: #0d2339;
+  color: #b7c8dc;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.battle-center .battle-status-chip[hidden] {
+  display: none;
+}
+
+.battle-center .battle-status-chip i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6f86a1;
+}
+
+.battle-center .battle-status-chip.is-live i {
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+}
+
+.battle-center .battle-status-chip b {
+  font-weight: 800;
+}
+
+/* ---------- Match of the Week spotlight ---------- */
+.battle-center .motw-arena {
+  min-height: 0;
+  margin-top: 14px;
+  border: 1px solid var(--bc-line);
+  border-radius: 18px;
+  background:
+    radial-gradient(ellipse 34% 90% at 16% 62%, rgba(58,120,200,.26), transparent 70%),
+    radial-gradient(ellipse 34% 90% at 84% 62%, rgba(224,72,96,.22), transparent 70%),
+    linear-gradient(180deg, #0e2036, #08121f);
+  box-shadow: none;
+}
+
+.battle-center .motw-arena::before {
+  inset: 44px auto 18px 50%;
+  width: 1px;
+  height: auto;
+  opacity: 1;
+  background: linear-gradient(180deg, transparent, rgba(255,255,255,.12), transparent);
+}
+
+.battle-center .motw-stage {
+  min-height: 0;
+  padding: 16px 28px 22px;
+  --fight-left-charge: 48%;
+  --fight-right-charge: -48%;
+  --fight-recoil-left: -14%;
+  --fight-recoil-right: 14%;
+}
+
+#battleFeatured .motw-stage {
+  cursor: default;
+}
+
+#battleFeatured .motw-stage.is-cast-selected {
+  box-shadow: none;
+}
+
+.battle-center .motw-topline {
+  font-size: 12px;
+}
+
+.battle-center .motw-label,
+.battle-center .motw-week {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .1em;
+}
+
+.battle-center .motw-label {
+  color: var(--gold-2);
+}
+
+.battle-center .motw-week {
+  color: #9fb2c8;
+}
+
+.battle-center .motw-fight {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) 340px minmax(0, 1fr);
+  align-items: end;
+  gap: 10px;
+  min-height: 0;
+  max-width: 1180px;
+  margin: 2px auto 0;
+}
+
+.battle-center .battle-fighter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.battle-center .battle-mascot {
+  width: 210px;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+  filter: drop-shadow(0 18px 20px rgba(0,0,0,.5));
+}
+
+.battle-center .battle-fighter h3 {
+  max-width: none;
+  margin: 6px 0 0;
+  font: 800 34px/1 "Barlow Condensed", sans-serif;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+
+.battle-center .battle-fighter p {
+  margin: 4px 0 0;
+  color: #8ea3bb;
+  font-size: 12.5px;
+}
+
+.battle-center .fighter-score {
+  margin-top: 8px;
+  color: #fff;
+  font: 800 72px/1 "Barlow Condensed", sans-serif;
+}
+
+.battle-center .fighter-score.is-trailing {
+  color: #8296ae;
+}
+
+.battle-center .fighter-champion {
+  margin: 4px 0 0;
+  font-size: 9px;
+}
+
+.battle-center .motw-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  padding-bottom: 10px;
+  text-align: center;
+}
+
+.battle-center .motw-kicker {
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.battle-center .battle-impact {
+  width: 84px;
+  height: 84px;
+  margin: 12px 0 8px;
+  background: radial-gradient(circle at 35% 30%, #ffe27c, #f0a91c);
+  box-shadow: 0 0 0 7px rgba(245,183,40,.18), 0 0 30px rgba(245,183,40,.4);
+}
+
+.battle-center .battle-impact strong {
+  color: #0b1626;
+  font: 800 34px/1 "Barlow Condensed", sans-serif;
+  letter-spacing: .02em;
+}
+
+.battle-center .impact-ring {
+  inset: -12px;
+}
+
+.battle-center .motw-tag {
+  color: #9fb2c8;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.battle-center .motw-chance {
+  width: 260px;
+  margin-top: 14px;
+}
+
+.battle-center .motw-chance[hidden] {
+  display: none;
+}
+
+.battle-center .motw-chance .row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: #9fb2c8;
+  font-size: 12.5px;
+}
+
+.battle-center .motw-chance .row b {
+  color: #fff;
+  font-size: 15px;
+}
+
+.battle-center .motw-chance .bc-wb {
+  margin-top: 0;
+}
+
+.battle-center .motw-reason {
+  max-width: 300px;
+  margin: 12px 0 0;
+  color: #a9bbd0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.battle-center .motw-open {
+  margin-top: 12px;
+  padding: 9px 16px;
+  border: 1px solid #6b5a1f;
+  border-radius: 10px;
+  background: rgba(245,183,40,.1);
+  color: var(--gold-2);
+  font: 800 12.5px Inter, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.battle-center .motw-open:hover {
+  background: rgba(245,183,40,.18);
+}
+
+.motw-stage.fight-impact::after {
+  width: 230px;
+  height: 230px;
+  top: 50%;
+}
+
+/* ---------- board: list + FantasyCast ---------- */
+.battle-center .battle-board {
+  display: grid;
+  grid-template-columns: minmax(440px, 500px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 14px;
+}
+
+.battle-center .battle-list-card {
+  overflow: hidden;
+  border: 1px solid var(--bc-line);
+  border-radius: 18px;
+  background: var(--bc-card);
+}
+
+.battle-center .battle-list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--bc-line);
+}
+
+.battle-center .battle-list-head h2 {
+  margin: 0;
+  font: 800 28px/1 "Barlow Condensed", sans-serif;
+}
+
+.battle-center .battle-list-hint {
+  color: #8ea3bb;
+  font-size: 12px;
+}
+
+.battle-center .battle-grid {
+  display: block;
+}
+
+.bc-row {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 14px 18px 13px;
+  border-bottom: 1px solid #162b43;
+  cursor: pointer;
+  text-align: left;
+}
+
+.bc-row:last-child {
+  border-bottom: 0;
+}
+
+.bc-row:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: -2px;
+}
+
+.bc-row.is-cast-selected {
+  background: rgba(245,183,40,.075);
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+
+.bc-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.bc-tags:empty {
+  display: none;
+}
+
+.bc-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 99px;
+  background: rgba(255,255,255,.06);
+  color: #c5d5e7;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: .02em;
+}
+
+.bc-tag.gold {
+  background: rgba(245,183,40,.16);
+  color: var(--gold-2);
+}
+
+.bc-tag.blue {
+  background: rgba(75,181,255,.14);
+  color: #8fd0ff;
+}
+
+.bc-tl {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.bc-lg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  overflow: hidden;
+  border: 1.5px solid rgba(255,209,91,.45);
+  border-radius: 50%;
+  background: #12263d;
+}
+
+.bc-lg img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.bc-tl .nm {
+  min-width: 0;
+}
+
+.bc-tl .nm strong {
+  display: block;
+  overflow: hidden;
+  font-size: 15.5px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bc-tl .nm small {
+  color: #8ea3bb;
+  font-size: 12px;
+}
+
+.bc-tl .sc {
+  min-width: 76px;
+  font: 800 32px/1 "Barlow Condensed", sans-serif;
+  text-align: right;
+}
+
+.bc-tl.is-trailing .sc {
+  color: #6f86a1;
+}
+
+.bc-tl.is-trailing .nm strong {
+  color: #b9c8da;
+}
+
+.bc-tl.motion-win .sc {
+  color: var(--gold-2);
+}
+
+.bc-wb {
+  display: flex;
+  height: 7px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #0b1a2d;
+}
+
+.bc-wb[hidden] {
+  display: none;
+}
+
+.bc-wb i {
+  display: block;
+  height: 100%;
+  transition: width .5s ease;
+}
+
+.bc-wb .a {
+  background: linear-gradient(90deg, #c58f14, #f5b728);
+}
+
+.bc-wb .b {
+  background: var(--bc-blue);
+}
+
+.bc-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+  color: #8ea3bb;
+  font-size: 12px;
+}
+
+.bc-foot b {
+  color: #dbe6f3;
+  font-weight: 700;
+}
+
+.bc-foot .mid {
+  text-align: center;
+}
+
+/* ---------- FantasyCast panel ---------- */
+.battle-center .battle-board .battle-fantasycast-preview {
+  min-width: 0;
+  margin-top: 0;
+}
+
+.battle-center .battle-board > .battle-fantasycast-preview:empty {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  border: 1px dashed #2a4260;
+  border-radius: 18px;
+  color: #6f87a3;
+  font-size: 13px;
+}
+
+.battle-center .battle-board > .battle-fantasycast-preview:empty::before {
+  content: "Select a matchup to open its FantasyCast";
+}
+
+.battle-center .fantasycast-shell {
+  border: 1px solid var(--bc-line);
+  border-radius: 18px;
+  background: var(--bc-card);
+  box-shadow: none;
+}
+
+.battle-center .fantasycast-topbar {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--bc-line);
+  color: #9fb2c8;
+  font-size: 12px;
+  letter-spacing: .04em;
+}
+
+.battle-center .fantasycast-topbar > div strong {
+  color: #fff;
+}
+
+.battle-center .fantasycast-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.battle-center .fantasycast-refresh-button,
+.battle-center .fantasycast-hide-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid #6b5a1f;
+  border-radius: 9px;
+  background: rgba(245,183,40,.08);
+  color: var(--gold-2);
+  font: 800 12px Inter, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.battle-center .battle-board > .battle-fantasycast-preview .fantasycast-hide-button {
+  display: none;
+}
+
+.battle-center .fantasycast-scoreboard {
+  grid-template-columns: minmax(0, 1fr) 210px minmax(0, 1fr);
+  gap: 16px;
+  padding: 18px 24px 6px;
+}
+
+.battle-center .fantasycast-team {
+  gap: 16px;
+}
+
+.battle-center .fantasycast-team img {
+  width: 96px;
+  height: 96px;
+  flex: 0 0 96px;
+  border: 1.5px solid rgba(255,209,91,.45);
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.battle-center .fantasycast-team > div > strong {
+  overflow: visible;
+  font: 800 34px/1 "Barlow Condensed", sans-serif;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.battle-center .fantasycast-team > div > span {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.battle-center .fantasycast-score {
+  margin-top: 6px;
+  font: 800 66px/1 "Barlow Condensed", sans-serif;
+}
+
+.battle-center .fantasycast-team small {
+  margin-top: 6px;
+  color: var(--gold-2);
+  font-size: 12.5px;
+  letter-spacing: 0;
+}
+
+.battle-center .fantasycast-team small em {
+  color: #a9bbd0;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.battle-center .fantasycast-center {
+  min-width: 0;
+}
+
+.battle-center .fantasycast-center span {
+  font-size: 11px;
+  letter-spacing: .1em;
+}
+
+.battle-center .fantasycast-center strong {
+  margin-top: 6px;
+  color: #fff;
+  font: 800 32px/1 "Barlow Condensed", sans-serif;
+}
+
+.battle-center .fantasycast-center em {
+  color: var(--gold);
+  font: 800 16px "Barlow Condensed", sans-serif;
+}
+
+.battle-center .fantasycast-winbar {
+  height: 8px;
+  margin: 10px 0 0;
+  background: var(--bc-blue);
+}
+
+.battle-center .fantasycast-winbar span {
+  display: block;
+  font-size: 0;
+  background: linear-gradient(90deg, #c58f14, #f5b728);
+  box-shadow: none;
+}
+
+.battle-center .fantasycast-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 6px 24px 16px;
+}
+
+.battle-center .fantasycast-summary > div {
+  padding: 9px 12px;
+  border: 1px solid #1d3550;
+  border-radius: 10px;
+  background: rgba(3,10,22,.35);
+  color: #a9bbd0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.battle-center .fantasycast-summary-right {
+  text-align: right;
+}
+
+.battle-center .fantasycast-summary b {
+  color: #fff;
+}
+
+.battle-center .fantasycast-lineup-head {
+  grid-template-columns: minmax(0, 1fr) 62px minmax(0, 1fr);
+  border-top: 1px solid #162b43;
+  background: rgba(3,10,22,.4);
+  color: #8ea3bb;
+  font-size: 12px;
+  letter-spacing: .06em;
+}
+
+.battle-center .fantasycast-lineup-head > * {
+  padding: 11px 20px;
+}
+
+.battle-center .fantasycast-lineup-head strong {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.battle-center .fantasycast-row {
+  grid-template-columns: minmax(0, 1fr) 62px minmax(0, 1fr);
+  min-height: 0;
+  border-top: 1px solid #162b43;
+  border-bottom: 0;
+}
+
+.battle-center .fantasycast-slot {
+  border-color: #162b43;
+  background: rgba(3,10,22,.25);
+  color: #8ea3bb;
+  font: 800 12px/1 Inter, system-ui, sans-serif;
+  letter-spacing: .04em;
+}
+
+.battle-center .fantasycast-player {
+  gap: 14px;
+  padding: 11px 20px;
+}
+
+.battle-center .fantasycast-player-main strong {
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.battle-center .fantasycast-player-main > span {
+  margin-top: 3px;
+  color: #8ea3bb;
+  font-size: 12px;
+}
+
+.battle-center .fantasycast-player-main > small {
+  display: inline-block;
+  margin-top: 5px;
+  padding: 2px 9px;
+  border-radius: 99px;
+  background: rgba(111,134,161,.14);
+  color: #a9bbd0;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.battle-center .fantasycast-player-main > small.is-final,
+.battle-center .fantasycast-player-main > small.is-live {
+  background: rgba(75,211,132,.14);
+  color: var(--green);
+}
+
+.battle-center .fantasycast-injury {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background: rgba(255,107,126,.14);
+  color: #ff9aa8;
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+.battle-center .fantasycast-injury.is-out {
+  background: rgba(255,107,126,.24);
+  color: #ffb2bc;
+}
+
+.battle-center .fantasycast-player-score strong {
+  font: 800 26px/1 "Barlow Condensed", sans-serif;
+}
+
+.battle-center .fantasycast-player-score > span {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.battle-center .fantasycast-bench-toggle {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: 13px 20px;
+  border: 0;
+  border-top: 1px solid #162b43;
+  background: rgba(245,183,40,.05);
+  color: var(--gold-2);
+  font: 800 13px Inter, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.battle-center .fantasycast-bench[hidden] {
+  display: none;
+}
+
+/* ---------- narrower than the two-column layout ---------- */
+@media (max-width: 1000px) {
+  .battle-center .battle-board {
+    grid-template-columns: 1fr;
+  }
+
+  .battle-center .battle-board > .battle-fantasycast-preview:empty {
+    display: none;
+  }
+}
+
+/* ---------- phone ---------- */
+@media (max-width: 760px) {
+  .battle-center {
+    padding-top: 12px;
+  }
+
+  .battle-center .battle-hero {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 14px 12px;
+    border-radius: 16px;
+  }
+
+  .battle-center .battle-hero h1 {
+    font-size: 38px;
+  }
+
+  .battle-center .battle-hero p {
+    font-size: 12px;
+  }
+
+  .battle-center .battle-week-control {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .battle-center .battle-week-control .battle-status-chip {
+    display: none;
+  }
+
+  .battle-center .motw-arena {
+    margin-top: 10px;
+  }
+
+  .battle-center .motw-arena::before {
+    display: none;
+  }
+
+  .battle-center .motw-stage {
+    padding: 12px 10px 16px;
+    --fight-left-charge: 14%;
+    --fight-right-charge: -14%;
+    --fight-recoil-left: -6%;
+    --fight-recoil-right: 6%;
+  }
+
+  .battle-center .motw-label,
+  .battle-center .motw-week {
+    font-size: 10px;
+    letter-spacing: .06em;
+    white-space: nowrap;
+  }
+
+  .battle-center .motw-fight {
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+  }
+
+  .battle-center .battle-fighter-left,
+  .battle-center .battle-fighter-right {
+    transform: translateY(24px) scale(.94);
+  }
+
+  .battle-center .battle-fighter.battle-entered {
+    transform: translateY(0) scale(1);
+  }
+
+  .battle-center .battle-mascot {
+    width: 138px;
+  }
+
+  .battle-center .battle-fighter h3 {
+    font-size: 21px;
+  }
+
+  .battle-center .battle-fighter p {
+    font-size: 11.5px;
+  }
+
+  .battle-center .fighter-score {
+    font-size: 46px;
+  }
+
+  .battle-center .motw-center {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    padding-top: 6px;
+  }
+
+  .battle-center .motw-fight > .battle-impact,
+  .battle-center .motw-center .battle-impact {
+    margin: 0;
+  }
+
+  .battle-center .motw-center .battle-impact {
+    position: absolute;
+    top: 44px;
+    left: calc(50% - 28px);
+    z-index: 2;
+    width: 56px;
+    height: 56px;
+  }
+
+  .battle-center .motw-center .battle-impact strong {
+    font-size: 24px;
+  }
+
+  .battle-center .motw-kicker {
+    margin-top: 2px;
+  }
+
+  .battle-center .motw-tag {
+    display: none;
+  }
+
+  .battle-center .motw-chance {
+    width: 100%;
+    max-width: 300px;
+  }
+
+  .battle-center .motw-reason {
+    max-width: 100%;
+  }
+
+  .motw-stage.fight-impact::after {
+    top: 38%;
+    width: 170px;
+    height: 170px;
+  }
+
+  /* The fight uses the same sideways charge as the desktop on phones. */
+  .battle-center .motw-stage.fight-charge .battle-fighter-left .battle-mascot {
+    animation: battleChargeLeft .52s cubic-bezier(.18,.88,.22,1) both;
+  }
+
+  .battle-center .motw-stage.fight-charge .battle-fighter-right .battle-mascot {
+    animation: battleChargeRight .52s cubic-bezier(.18,.88,.22,1) both;
+  }
+
+  .battle-center .battle-board {
+    margin-top: 10px;
+  }
+
+  .battle-center .battle-list-head {
+    padding: 12px;
+  }
+
+  /* Same text, shorter: "Tap to open" */
+  .battle-center .battle-list-hint {
+    font-size: 0;
+  }
+
+  .battle-center .battle-list-hint::after {
+    content: "Tap to open";
+    font-size: 11px;
+  }
+
+  .bc-row {
+    padding: 12px;
+  }
+
+  .bc-foot {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .bc-foot .mid {
+    flex: 1 0 100%;
+    order: 3;
+  }
+
+  /* FantasyCast opens directly under the tapped row. */
+  .battle-center .battle-grid > .battle-fantasycast-preview {
+    margin: 0;
+  }
+
+  .battle-center .battle-grid > .battle-fantasycast-preview:empty {
+    display: none;
+  }
+
+  .battle-center .battle-grid .fantasycast-shell {
+    border: 0;
+    border-top: 1px solid var(--bc-line);
+    border-radius: 0;
+    background: #0a1829;
+  }
+
+  .battle-center .battle-grid .fantasycast-hide-button {
+    display: inline-flex;
+  }
+
+  .battle-center .fantasycast-topbar {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+  }
+
+  .battle-center .fantasycast-scoreboard {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 14px 12px 6px;
+  }
+
+  .battle-center .fantasycast-center {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .battle-center .fantasycast-team {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .battle-center .fantasycast-team-right {
+    flex-direction: column;
+    align-items: flex-end;
+  }
+
+  .battle-center .fantasycast-team img {
+    width: 56px;
+    height: 56px;
+    flex-basis: 56px;
+  }
+
+  .battle-center .fantasycast-team > div > strong {
+    font-size: 24px;
+    white-space: normal;
+  }
+
+  .battle-center .fantasycast-score {
+    font-size: 48px;
+  }
+
+  .battle-center .fantasycast-summary {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 6px 12px 12px;
+  }
+
+  .battle-center .fantasycast-summary-right {
+    text-align: left;
+  }
+
+  .battle-center .fantasycast-lineup-head,
+  .battle-center .fantasycast-row {
+    grid-template-columns: minmax(0, 1fr) 40px minmax(0, 1fr);
+  }
+
+  .battle-center .fantasycast-lineup-head > * {
+    padding: 9px 10px;
+  }
+
+  .battle-center .fantasycast-player {
+    grid-template-columns: 1fr;
+    gap: 4px;
+    padding: 10px;
+  }
+
+  .battle-center .fantasycast-player-main strong {
+    font-size: 13.5px;
+  }
+
+  .battle-center .fantasycast-player-main > span {
+    font-size: 11.5px;
+  }
+
+  .battle-center .fantasycast-player-score strong,
+  .battle-center .fantasycast-player-score > span {
+    display: inline;
+  }
+
+  .battle-center .fantasycast-player-score strong {
+    font-size: 22px;
+  }
+
+  .battle-center .fantasycast-player-score > span {
+    margin-left: 6px;
+  }
+}

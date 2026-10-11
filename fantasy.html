@@ -229,9 +229,8 @@
       <section class="view-panel battle-center" data-view="battle">
         <section class="battle-hero">
           <div class="battle-hero-copy">
-            <span class="section-kicker">Zenni League Fight Night</span>
-            <h1>BATTLE CENTER</h1>
-            <p>Every matchup gets a face-off. One matchup gets the spotlight because the story actually means something.</p>
+            <h1>BATTLE <em>CENTER</em></h1>
+            <p id="battleHeroSub">Every matchup gets a face-off. One matchup gets the spotlight because the story actually means something.</p>
           </div>
 
           <div class="battle-week-control">
@@ -241,6 +240,7 @@
               <strong id="battleWeekLabel">Week 1</strong>
             </div>
             <button type="button" class="week-button battle-week-button" id="battleNextWeek" aria-label="Next battle week">›</button>
+            <span class="battle-status-chip" id="battleStatusChip" hidden><i></i><b>IN PROGRESS</b></span>
           </div>
         </section>
 
@@ -248,19 +248,19 @@
           <div class="arena-loading skeleton-block"></div>
         </section>
 
-        <section class="battle-fantasycast-preview" id="battleFantasyCast" aria-live="polite"></section>
-
-        <section class="battle-card-section">
-          <div class="section-heading">
-            <div>
-              <span class="section-kicker">Full Battle Card</span>
-              <h2>Week <span id="battleCardWeek">1</span> Face-Offs</h2>
+        <div class="battle-board" id="battleBoard">
+          <section class="battle-list-card" aria-label="All matchups">
+            <div class="battle-list-head">
+              <h2>All matchups</h2>
+              <span class="battle-list-hint">Tap one to open its FantasyCast</span>
+              <span class="battle-list-meta" hidden><span id="battleCount">6 battles</span> · Week <span id="battleCardWeek">1</span></span>
             </div>
-            <span class="battle-count" id="battleCount">6 battles</span>
-          </div>
 
-          <div class="battle-grid" id="battleGrid"></div>
-        </section>
+            <div class="battle-grid" id="battleGrid"></div>
+          </section>
+
+          <section class="battle-fantasycast-preview" id="battleFantasyCast" aria-live="polite"></section>
+        </div>
       </section>
 
       <section class="view-panel awards-view" data-view="awards">

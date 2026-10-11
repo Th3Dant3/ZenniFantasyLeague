@@ -79,6 +79,22 @@ const CUSTOM_TEAM_ICONS = Object.freeze({
   12: 'assets/teams/jeremys-scary-team.png'
 });
 
+// Short labels for the win-chance line under each matchup row.
+const CUSTOM_TEAM_SHORT_NAMES = Object.freeze({
+  1: 'Dante',
+  2: 'iambad2',
+  3: "Brittany's",
+  4: 'Cheetahs',
+  5: 'Baby Back',
+  6: "Devin's",
+  7: "Day's",
+  8: 'Boom',
+  9: 'GO BIRDS',
+  10: 'Canadian',
+  11: '740',
+  12: "Jeremy's"
+});
+
 /*
  * Manual storylines.
  *
@@ -168,6 +184,12 @@ const state = {
   battleCastSelectedKey: null,
   battleCastOpen: true,
   battleCastRequestSeq: 0,
+  battleCastMq: null,
+  battleBoard: new Map(),
+  battleBoardLoading: false,
+  battleBoardTimer: null,
+  battleBenchOpen: false,
+  battleKickoffAsked: false,
   scoreSyncTimer: null,
 
   // Resilience layer
@@ -926,7 +948,7 @@ const TOAST_MAX_INDIVIDUAL = 3;
 
 const MOTION_SURFACES = Object.freeze([
   { host: '.overview-matchup-card[data-matchup-key]', home: '.overview-matchup-home', away: '.overview-matchup-away', score: '.matchup-score' },
-  { host: '.battle-card[data-matchup-key]', home: '.battle-mini-left', away: '.battle-mini-right', score: 'span' },
+  { host: '.bc-row[data-matchup-key]', home: '.bc-tl-home', away: '.bc-tl-away', score: '.sc' },
   { host: '.motw-stage[data-matchup-key]', home: '.battle-fighter-left', away: '.battle-fighter-right', score: '.fighter-score' },
   { host: '#featuredMatchup[data-matchup-key]', home: '.featured-team-left', away: '.featured-team-right', score: '.featured-score' },
   { host: '.mystrip-card[data-matchup-key]', home: '.mystrip-team[data-side="home"]', away: '.mystrip-team[data-side="away"]', score: '.mystrip-score' }
@@ -949,6 +971,9 @@ function setScoreText_(element, value) {
 function rollNumber_(element, from, to, duration = 650) {
   if (!element) return;
 
+  // A newer roll, or an in-place score patch, on the same element supersedes this one.
+  const rollToken = (element._rollToken = (element._rollToken || 0) + 1);
+
   if (motionReduced_() || document.hidden) {
     setScoreText_(element, to);
     return;
@@ -958,6 +983,8 @@ function rollNumber_(element, from, to, duration = 650) {
   setScoreText_(element, from);
 
   const step = now => {
+    if (element._rollToken !== rollToken) return;
+
     const t = Math.min(1, (now - start) / duration);
     const eased = 1 - Math.pow(1 - t, 3);
     setScoreText_(element, from + (to - from) * eased);
@@ -1472,7 +1499,7 @@ function applyMyTeamHighlights_() {
   const toggle = (element, on) => element.classList.toggle('is-mine', Boolean(on));
 
   document
-    .querySelectorAll('.overview-matchup-card[data-matchup-key], .battle-card[data-matchup-key], .motw-stage[data-matchup-key]')
+    .querySelectorAll('.overview-matchup-card[data-matchup-key], .bc-row[data-matchup-key], .motw-stage[data-matchup-key]')
     .forEach(element => toggle(element, myId && keyTeamIds_(element.dataset.matchupKey).includes(myId)));
 
   document.querySelectorAll('tr[data-team-id]').forEach(row => toggle(row, myId && Number(row.dataset.teamId) === myId));
@@ -2984,6 +3011,8 @@ function switchView(view) {
       startBattleFightLoop_();
       loadBattleFantasyCast_();
     }, 850);
+
+    battleScheduleBoardLoad_();
   } else {
     stopBattleFightLoop_();
     stopBattleFantasyCastPolling_();
@@ -5293,6 +5322,7 @@ async function refreshCurrentWeekMatchups_(render = true) {
 }
 
 function setWeekLoading(week) {
+  battleParkCast_();
   syncWeekLabels(week);
   document.getElementById('overviewMatchups').innerHTML = '<div class="skeleton-block"></div>';
   document.getElementById('battleGrid').innerHTML = '<div class="skeleton-block"></div>';
@@ -5300,6 +5330,7 @@ function setWeekLoading(week) {
 }
 
 function renderWeekError(error, week) {
+  battleParkCast_();
   const message = escapeHtml(error.message || String(error));
   document.getElementById('overviewMatchups').innerHTML = `<div class="error-panel">${message}</div>`;
   document.getElementById('battleGrid').innerHTML = `<div class="error-panel">${message}</div>`;
@@ -5400,6 +5431,10 @@ function renderBattleCenter(matchups, week) {
   const featuredContainer = document.getElementById('battleFeatured');
   const grid = document.getElementById('battleGrid');
 
+  // The FantasyCast panel can be parked inside the grid on phones. Every
+  // grid rewrite below would destroy it, so it always goes home first.
+  battleParkCast_();
+
   document.getElementById('battleCount').textContent =
     `${matchups.length} ${matchups.length === 1 ? 'battle' : 'battles'}`;
 
@@ -5408,6 +5443,7 @@ function renderBattleCenter(matchups, week) {
     grid.innerHTML = '';
     const cast = document.getElementById('battleFantasyCast');
     if (cast) cast.innerHTML = '';
+    updateBattleHero_(matchups, week);
     return;
   }
 
@@ -5416,32 +5452,63 @@ function renderBattleCenter(matchups, week) {
   const featuredKey = battleMatchupKey_(featured, week);
 
   // New week or stale selection: start with Match of the Week open.
+  let selectionReset = false;
   if (!state.battleCastSelectedKey || !validKeys.has(state.battleCastSelectedKey)) {
     // Followers land on their own matchup; everyone else on Match of the Week.
     state.battleCastSelectedKey = myMatchupKeyIn_(matchups, week) || featuredKey;
     state.battleCastOpen = true;
+    selectionReset = true;
   }
 
-  const others = matchups.filter(match => match !== featured);
+  // The list shows every matchup, Match of the Week first.
+  const ordered = [featured].concat(matchups.filter(match => match !== featured));
   const featuredStory = getMatchupStory(featured, week);
+
+  // A score poll calls this every 1-5 minutes with the same teams and only new
+  // numbers. Rebuilding the DOM for that destroys the stage, kills the fight
+  // loop mid-swing and replays the entrance. When nothing structural changed,
+  // patch scores, tags, win chance and status text in place instead.
+  const featuredSig = battleStructureHash_([
+    week,
+    featuredKey,
+    battleMatchupSignature_(featured, featuredStory)
+  ]);
+
+  const gridSig = battleStructureHash_([
+    week,
+    ordered.map(match => [
+      battleMatchupKey_(match, match.week || state.selectedWeek),
+      match.week || state.selectedWeek,
+      battleMatchupSignature_(match, null)
+    ])
+  ]);
+
+  updateBattleHero_(matchups, week);
+  battleEnsureCastPlacement_();
+
+  if (!selectionReset &&
+      battleCanPatchInPlace_(featuredContainer, grid, featuredSig, gridSig, ordered.length)) {
+    battleSyncAll_(featuredContainer, grid, matchups, featuredKey, week);
+    updateBattleCastSelectionUi_();
+    battleScheduleBoardLoad_();
+    return;
+  }
 
   featuredContainer.innerHTML = battleFeaturedMarkup(featured, featuredStory, week);
 
   const featuredStage = featuredContainer.querySelector('.motw-stage');
   if (featuredStage) {
     featuredStage.dataset.matchupKey = featuredKey;
-    featuredStage.setAttribute('role', 'button');
-    featuredStage.setAttribute('tabindex', '0');
-    featuredStage.classList.toggle(
-      'is-cast-selected',
-      state.battleCastOpen && state.battleCastSelectedKey === featuredKey
-    );
+    featuredStage.dataset.battleSig = featuredSig;
   }
 
-  grid.innerHTML = others.map((match, index) =>
-    battleCardMarkup(match, getMatchupStory(match, week), index)
-  ).join('');
+  grid.innerHTML = ordered.map(match => battleRowMarkup_(match)).join('');
 
+  grid.querySelectorAll('.bc-row').forEach(row => {
+    row.dataset.battleSig = gridSig;
+  });
+
+  battleSyncAll_(featuredContainer, grid, matchups, featuredKey, week);
   bindBattleFantasyCastCards_(featuredContainer, grid);
   updateBattleCastSelectionUi_();
 
@@ -5460,78 +5527,622 @@ function renderBattleCenter(matchups, week) {
       }, 850);
     }
   });
+
+  battleScheduleBoardLoad_();
 }
+
+// ---------------------------------------------------------------------------
+// Battle Center in-place refresh
+// What the Battle markup depends on, apart from scores and status text, is
+// fingerprinted so a score poll can patch numbers instead of rebuilding the DOM.
+// ---------------------------------------------------------------------------
+function battleStructureHash_(value) {
+  const text = JSON.stringify(value);
+  let hash = 5381;
+
+  for (let i = 0; i < text.length; i += 1) {
+    hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
+  }
+
+  return `${text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
+}
+
+function battleTeamSignature_(team) {
+  if (!team) return null;
+
+  return [
+    Number(team.id),
+    String(team.name || ''),
+    ownerText(team),
+    battleTeamRecord_(team),
+    getTeamIcon(team),
+    Boolean(team.defendingChampion),
+    Boolean(team.logo)
+  ];
+}
+
+function battleStorySignature_(story) {
+  if (!story) return null;
+  return [story.eyebrow, story.title, story.reason, story.tag];
+}
+
+function battleMatchupSignature_(match, story) {
+  return [
+    Number(match.homeTeamId || 0),
+    Number(match.awayTeamId || 0),
+    battleTeamSignature_(state.teamMap.get(Number(match.homeTeamId))),
+    battleTeamSignature_(state.teamMap.get(Number(match.awayTeamId))),
+    battleStorySignature_(story)
+  ];
+}
+
+// True only when the stage and every row in the DOM were built from the same
+// structure. A skeleton, an error panel, a new week or a changed team all fail
+// this check and fall through to the normal full rebuild.
+function battleCanPatchInPlace_(featuredContainer, grid, featuredSig, gridSig, rowCount) {
+  const stage = featuredContainer.querySelector('.motw-stage');
+  if (!stage || stage.dataset.battleSig !== featuredSig) return false;
+
+  const rows = grid.querySelectorAll('.bc-row');
+  if (rows.length !== rowCount) return false;
+
+  return Array.from(rows).every(row => row.dataset.battleSig === gridSig);
+}
+
+// Writes a score into an element and cancels any score roll still running on it.
+function battleSetScore_(root, selector, value) {
+  const element = root && root.querySelector(selector);
+  if (!element) return;
+
+  element._rollToken = (element._rollToken || 0) + 1;
+  setScoreText_(element, value);
+}
+
+function battleLeaderSide_(match) {
+  const home = Number(match.homeScore || 0);
+  const away = Number(match.awayScore || 0);
+  return home > away ? 'home' : away > home ? 'away' : '';
+}
+
+function battleMatchStatusText_(match) {
+  const status = effectiveMatchupStatus_(match);
+  if (status === 'FINAL') return 'FINAL';
+  if (status === 'LIVE' || status === 'IN_PROGRESS') return 'IN PROGRESS';
+  return 'SCHEDULED';
+}
+
+// Everything that changes with live data and nothing that changes the structure:
+// scores, trailing dim, tags, win chance, players left and status text.
+function battleSyncAll_(featuredContainer, grid, matchups, featuredKey, week) {
+  const list = Array.isArray(matchups) ? matchups : [];
+  const byKey = new Map(list.map(match => [battleMatchupKey_(match, match.week || state.selectedWeek), match]));
+
+  const stage = featuredContainer && featuredContainer.querySelector('.motw-stage');
+  const featured = list.find(match => battleMatchupKey_(match, week) === featuredKey);
+  if (stage && featured) battleSyncSpotlight_(stage, featured);
+
+  const tags = battleRowTags_(list, week, featuredKey);
+
+  grid.querySelectorAll('.bc-row').forEach(row => {
+    const match = byKey.get(row.dataset.matchupKey);
+    if (!match) return;
+    battleSyncRow_(row, match, tags.get(row.dataset.matchupKey) || []);
+  });
+}
+
+function battleSyncSpotlight_(stage, match) {
+  const leader = battleLeaderSide_(match);
+
+  battleSetScore_(stage, '.battle-fighter-left .fighter-score', match.homeScore);
+  battleSetScore_(stage, '.battle-fighter-right .fighter-score', match.awayScore);
+
+  const homeScore = stage.querySelector('.battle-fighter-left .fighter-score');
+  const awayScore = stage.querySelector('.battle-fighter-right .fighter-score');
+  if (homeScore) homeScore.classList.toggle('is-trailing', leader === 'away');
+  if (awayScore) awayScore.classList.toggle('is-trailing', leader === 'home');
+
+  const weekLabel = stage.querySelector('[data-motw-week]');
+  if (weekLabel) {
+    weekLabel.textContent = `WEEK ${match.week || state.selectedWeek} · ${battleMatchStatusText_(match)}`;
+  }
+
+  const box = stage.querySelector('[data-motw-chance]');
+  if (!box) return;
+
+  const insight = effectiveMatchupStatus_(match) === 'FINAL' ? null : battleBoardInsight_(match);
+
+  if (!insight) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+
+  const homeTeam = state.teamMap.get(Number(match.homeTeamId));
+  const awayTeam = state.teamMap.get(Number(match.awayTeamId));
+
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="row">
+      <span><b>${insight.chance.home}%</b> ${escapeHtml(battleShortName_(homeTeam))}</span>
+      <span>chance to win</span>
+      <span><b>${insight.chance.away}%</b> ${escapeHtml(battleShortName_(awayTeam))}</span>
+    </div>
+    <div class="bc-wb"><i class="a" style="width:${insight.chance.home}%"></i><i class="b" style="width:${insight.chance.away}%"></i></div>
+  `;
+}
+
+function battleSyncRow_(row, match, tags) {
+  const homeTeam = state.teamMap.get(Number(match.homeTeamId));
+  const awayTeam = state.teamMap.get(Number(match.awayTeamId));
+  const leader = battleLeaderSide_(match);
+
+  battleSetScore_(row, '.bc-tl-home .sc', match.homeScore);
+  battleSetScore_(row, '.bc-tl-away .sc', match.awayScore);
+
+  const homeLine = row.querySelector('.bc-tl-home');
+  const awayLine = row.querySelector('.bc-tl-away');
+  if (homeLine) homeLine.classList.toggle('is-trailing', leader === 'away');
+  if (awayLine) awayLine.classList.toggle('is-trailing', leader === 'home');
+
+  const tagBox = row.querySelector('.bc-tags');
+  if (tagBox) {
+    const html = tags.map(tag => `<span class="bc-tag ${tag.cls}">${escapeHtml(tag.text)}</span>`).join('');
+    if (tagBox.dataset.sig !== html) {
+      tagBox.innerHTML = html;
+      tagBox.dataset.sig = html;
+    }
+  }
+
+  const status = effectiveMatchupStatus_(match);
+  const isFinal = status === 'FINAL';
+  const isLive = status === 'LIVE' || status === 'IN_PROGRESS';
+  const insight = isFinal ? null : battleBoardInsight_(match);
+
+  const bar = row.querySelector('[data-bc-bar]');
+  const homeEl = row.querySelector('[data-bc-home]');
+  const awayEl = row.querySelector('[data-bc-away]');
+  const mid = row.querySelector('[data-bc-mid]');
+
+  let midHtml = escapeHtml(matchupStatusLabel_(match));
+
+  if (insight) {
+    if (bar) {
+      bar.hidden = false;
+      const a = bar.querySelector('.a');
+      const b = bar.querySelector('.b');
+      if (a) a.style.width = `${insight.chance.home}%`;
+      if (b) b.style.width = `${insight.chance.away}%`;
+    }
+    if (homeEl) homeEl.innerHTML = `<b>${insight.chance.home}%</b> ${escapeHtml(battleShortName_(homeTeam))}`;
+    if (awayEl) awayEl.innerHTML = `<b>${insight.chance.away}%</b> ${escapeHtml(battleShortName_(awayTeam))}`;
+    if (isLive) midHtml += ` · <b>${insight.homeLeft}</b> / <b>${insight.awayLeft}</b> left`;
+  } else {
+    if (bar) bar.hidden = true;
+    if (homeEl) homeEl.textContent = '';
+    if (awayEl) awayEl.textContent = '';
+  }
+
+  if (mid) mid.innerHTML = midHtml;
+}
+
+// Row tags come from real data only: your own team, Match of the Week, and the
+// closest / biggest-lead games among matchups that actually have points.
+function battleRowTags_(matchups, week, featuredKey) {
+  const tags = new Map();
+  const rowKey = match => battleMatchupKey_(match, match.week || state.selectedWeek);
+  const add = (match, cls, text) => {
+    const key = rowKey(match);
+    if (!tags.has(key)) tags.set(key, []);
+    tags.get(key).push({ cls, text });
+  };
+
+  const myKey = myMatchupKeyIn_(matchups, week);
+  const withPoints = matchups.filter(match =>
+    Number(match.homeScore || 0) + Number(match.awayScore || 0) > 0
+  );
+
+  let closest = null;
+  let biggest = null;
+
+  if (withPoints.length >= 2) {
+    withPoints.forEach(match => {
+      const margin = Math.abs(Number(match.homeScore || 0) - Number(match.awayScore || 0));
+      if (!closest || margin < closest.margin) closest = { match, margin };
+      if (!biggest || margin > biggest.margin) biggest = { match, margin };
+    });
+
+    if (closest.match === biggest.match) biggest = null;
+  }
+
+  matchups.forEach(match => {
+    if (battleMatchupKey_(match, week) === featuredKey) add(match, 'gold', '★ Match of the Week');
+    if (myKey && battleMatchupKey_(match, week) === myKey) add(match, 'gold', 'Your matchup');
+    if (closest && closest.match === match) add(match, 'blue', 'Closest game');
+    if (biggest && biggest.match === match) add(match, '', 'Biggest lead');
+  });
+
+  return tags;
+}
+
+// ---------------------------------------------------------------------------
+// Battle Center board data
+// Win chance and "players left" for every row need each team's roster. The
+// FantasyCast already loads two of them, so those are free; the rest are
+// fetched two at a time, only while the Battle tab is visible, and reused for
+// BATTLE_BOARD_TTL_MS. Set BATTLE_BOARD_ENABLED to false to stop the extra
+// requests: rows then simply show scores and status without win chance.
+// ---------------------------------------------------------------------------
+const BATTLE_BOARD_ENABLED = true;
+const BATTLE_BOARD_TTL_MS = 2 * 60 * 1000;
+
+function battleBoardWeek_() {
+  return Number(state.league && state.league.currentWeek || state.selectedWeek || 1);
+}
+
+function battleBoardEntryFromRoster_(data) {
+  const roster = Array.isArray(data && data.roster) ? data.roster : [];
+  const starters = normalizeBattleLineup_(roster).starters.filter(Boolean);
+
+  // Same projection rule the FantasyCast uses, so a row and its panel agree.
+  const projection = Number.isFinite(Number(data && data.teamProjectedPoints))
+    ? Number(data.teamProjectedPoints)
+    : rosterProjectionTotal_(starters);
+
+  return {
+    projection,
+    left: battleStartersLeft_(starters),
+    remaining: battleRemainingProjection_(starters),
+    week: battleBoardWeek_(),
+    at: Date.now()
+  };
+}
+
+function battleRememberTeam_(teamId, data) {
+  state.battleBoard.set(Number(teamId), battleBoardEntryFromRoster_(data));
+}
+
+function battleBoardEntry_(teamId) {
+  const entry = state.battleBoard.get(Number(teamId));
+  return entry && entry.week === battleBoardWeek_() ? entry : null;
+}
+
+// Only the current week has live rosters. Anything else returns null.
+function battleBoardInsight_(match) {
+  if (Number(match.week || state.selectedWeek) !== battleBoardWeek_()) return null;
+
+  const home = battleBoardEntry_(match.homeTeamId);
+  const away = battleBoardEntry_(match.awayTeamId);
+  if (!home || !away) return null;
+
+  return {
+    chance: battleWinChance_(
+      Number(match.homeScore || 0),
+      Number(match.awayScore || 0),
+      home.projection,
+      away.projection
+    ),
+    homeLeft: home.left,
+    awayLeft: away.left
+  };
+}
+
+function battleStartersLeft_(starters) {
+  return starters.filter(player => {
+    const status = battlePlayerGameStatus_(player);
+    return status !== 'FINAL' && status !== 'POST';
+  }).length;
+}
+
+// Projected points still to come: nothing for finished players, projection
+// minus points so far for live players (never below zero), full projection for
+// players who have not kicked off.
+function battleRemainingProjection_(starters) {
+  return starters.reduce((sum, player) => {
+    const status = battlePlayerGameStatus_(player);
+    if (status === 'FINAL' || status === 'POST') return sum;
+
+    const projection = battlePlayerProjection_(player) || 0;
+
+    if (status === 'LIVE' || status === 'IN_PROGRESS') {
+      return sum + Math.max(0, projection - (battlePlayerActualPoints_(player) || 0));
+    }
+
+    return sum + projection;
+  }, 0);
+}
+
+function battleRefreshBoardUi_() {
+  const featuredContainer = document.getElementById('battleFeatured');
+  const grid = document.getElementById('battleGrid');
+  const stage = featuredContainer && featuredContainer.querySelector('.motw-stage');
+  if (!grid || !stage) return;
+
+  const week = Number(state.selectedWeek || 1);
+  const matchups = state.weekCache.get(week) || state.currentMatchups || [];
+  if (!matchups.length) return;
+
+  battleSyncAll_(featuredContainer, grid, matchups, stage.dataset.matchupKey, week);
+}
+
+function battleScheduleBoardLoad_() {
+  if (!BATTLE_BOARD_ENABLED) return;
+
+  if (state.battleBoardTimer) window.clearTimeout(state.battleBoardTimer);
+
+  // Give the FantasyCast a head start so its two rosters are not fetched twice.
+  state.battleBoardTimer = window.setTimeout(() => {
+    state.battleBoardTimer = null;
+    loadBattleBoardData_();
+  }, 1200);
+}
+
+async function loadBattleBoardData_() {
+  if (!BATTLE_BOARD_ENABLED || state.battleBoardLoading) return;
+  if (state.activeView !== 'battle' || document.hidden) return;
+
+  const week = Number(state.selectedWeek || 1);
+  if (week !== battleBoardWeek_()) return;
+
+  const matchups = state.weekCache.get(week) || state.currentMatchups || [];
+  const ids = [];
+  matchups.forEach(match => {
+    ids.push(Number(match.homeTeamId), Number(match.awayTeamId));
+  });
+
+  const stale = Array.from(new Set(ids)).filter(id => {
+    const entry = battleBoardEntry_(id);
+    return !entry || (Date.now() - entry.at) > BATTLE_BOARD_TTL_MS;
+  });
+
+  if (!stale.length) return;
+
+  state.battleBoardLoading = true;
+
+  try {
+    for (let i = 0; i < stale.length; i += 2) {
+      if (state.activeView !== 'battle' || document.hidden || Number(state.selectedWeek || 1) !== week) break;
+
+      await Promise.all(stale.slice(i, i + 2).map(async teamId => {
+        try {
+          battleRememberTeam_(teamId, await api_('roster', { teamId }));
+        } catch (error) {
+          // A team that fails to load just shows no win chance.
+        }
+      }));
+
+      battleRefreshBoardUi_();
+    }
+  } finally {
+    state.battleBoardLoading = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Battle Center hero text
+// ---------------------------------------------------------------------------
+function battleKickoffText_(ms) {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const text = date.toLocaleString('en-US', {
+    weekday: 'long',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'America/New_York'
+  });
+
+  return `${text.replace(',', '')} ET`;
+}
+
+function updateBattleHero_(matchups, week) {
+  const sub = document.getElementById('battleHeroSub');
+  const chip = document.getElementById('battleStatusChip');
+  const statuses = (Array.isArray(matchups) ? matchups : []).map(match => effectiveMatchupStatus_(match));
+
+  let sentence;
+  let chipText = '';
+  let live = false;
+
+  if (!statuses.length) {
+    sentence = `Week ${week}: waiting for matchup data.`;
+  } else if (statuses.every(value => value === 'FINAL')) {
+    sentence = `Week ${week} is final.`;
+    chipText = 'FINAL';
+  } else if (statuses.every(value => value === 'SCHEDULED')) {
+    sentence = `Week ${week} has not kicked off yet.`;
+    chipText = 'SCHEDULED';
+  } else {
+    sentence = `Week ${week} is in progress.`;
+    chipText = 'IN PROGRESS';
+    live = true;
+  }
+
+  const isCurrent = Number(week) === Number(state.league && state.league.currentWeek);
+  if (isCurrent && state.kickoffMs && state.kickoffMs > Date.now()) {
+    sentence += ` Next kickoff ${battleKickoffText_(state.kickoffMs)}.`;
+  }
+
+  if (sub) sub.textContent = sentence;
+
+  if (chip) {
+    chip.hidden = !chipText;
+    const label = chip.querySelector('b');
+    if (label) label.textContent = chipText;
+    chip.classList.toggle('is-live', live);
+  }
+
+  // Throttled inside loadRecapKickoff_; refresh the sentence once the time is known.
+  if (isCurrent && typeof loadRecapKickoff_ === 'function' && !state.battleKickoffAsked) {
+    state.battleKickoffAsked = true;
+    Promise.resolve(loadRecapKickoff_())
+      .then(() => updateBattleHero_(matchups, week))
+      .catch(() => {})
+      .finally(() => { state.battleKickoffAsked = false; });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FantasyCast placement: right-hand column on wide screens, directly under the
+// selected row on phones.
+// ---------------------------------------------------------------------------
+const BATTLE_PHONE_QUERY = '(max-width: 760px)';
+
+function battleParkCast_() {
+  const cast = document.getElementById('battleFantasyCast');
+  const board = document.getElementById('battleBoard');
+  if (cast && board && cast.parentElement !== board) board.appendChild(cast);
+}
+
+function placeBattleCast_() {
+  const cast = document.getElementById('battleFantasyCast');
+  const board = document.getElementById('battleBoard');
+  const grid = document.getElementById('battleGrid');
+  if (!cast || !board || !grid) return;
+
+  const phone = Boolean(window.matchMedia && window.matchMedia(BATTLE_PHONE_QUERY).matches);
+
+  if (phone && state.battleCastOpen) {
+    const row = Array.from(grid.querySelectorAll('.bc-row'))
+      .find(item => item.dataset.matchupKey === state.battleCastSelectedKey);
+
+    if (row) {
+      if (row.nextElementSibling !== cast) row.after(cast);
+      return;
+    }
+  }
+
+  if (cast.parentElement !== board) board.appendChild(cast);
+}
+
+function battleEnsureCastPlacement_() {
+  if (state.battleCastMq || !window.matchMedia) return;
+
+  state.battleCastMq = window.matchMedia(BATTLE_PHONE_QUERY);
+
+  if (state.battleCastMq.addEventListener) {
+    state.battleCastMq.addEventListener('change', placeBattleCast_);
+  } else if (state.battleCastMq.addListener) {
+    state.battleCastMq.addListener(placeBattleCast_);
+  }
+}
+
+function battleOpenCast_(key) {
+  if (!key || !getBattleMatchupByKey_(key)) return;
+
+  const same = state.battleCastSelectedKey === key && state.battleCastOpen;
+
+  state.battleCastSelectedKey = key;
+  state.battleCastOpen = true;
+
+  if (!same) {
+    const container = document.getElementById('battleFantasyCast');
+    if (container) {
+      container.innerHTML = '';
+      container.classList.remove('is-open');
+    }
+  }
+
+  updateBattleCastSelectionUi_();
+  loadBattleFantasyCast_(true);
+
+  window.setTimeout(scrollBattleFantasyCastIntoView_, 80);
+}
+
+// ---------------------------------------------------------------------------
+// Battle Center markup
+// ---------------------------------------------------------------------------
+function battleTeamRecord_(team) {
+  const standing = team ? getStandingForTeam_(team.id) : null;
+  if (!standing) return '';
+
+  const wins = Number(standing.wins || 0);
+  const losses = Number(standing.losses || 0);
+  const ties = Number(standing.ties || 0);
+
+  return ties ? `${wins}-${losses}-${ties}` : `${wins}-${losses}`;
+}
+
+function battleShortName_(team) {
+  if (!team) return '';
+  return CUSTOM_TEAM_SHORT_NAMES[Number(team.id)] || team.name || '';
+}
+
 function battleFeaturedMarkup(match, story, week) {
   const home = state.teamMap.get(Number(match.homeTeamId));
   const away = state.teamMap.get(Number(match.awayTeamId));
+  const leader = battleLeaderSide_(match);
 
   return `
     <div class="motw-stage">
       <div class="motw-topline">
-        <span class="motw-label">MATCH OF THE WEEK</span>
-        <span class="motw-week">WEEK ${week}</span>
-      </div>
-
-      <div class="motw-story">
-        <span>${escapeHtml(story.eyebrow)}</span>
-        <h2>${escapeHtml(story.title)}</h2>
-        <p>${escapeHtml(story.reason)}</p>
+        <span class="motw-label">★ MATCH OF THE WEEK</span>
+        <span class="motw-week" data-motw-week>WEEK ${week} · ${battleMatchStatusText_(match)}</span>
       </div>
 
       <div class="motw-fight">
-        ${battleFighterMarkup(home, match.homeScore, 'left')}
-        <div class="battle-impact" aria-hidden="true">
-          <span class="impact-ring"></span>
-          <strong>VS</strong>
-          <small>${escapeHtml(story.tag)}</small>
+        ${battleFighterMarkup(home, match.homeScore, 'left', leader === 'away')}
+        <div class="motw-center">
+          <span class="motw-kicker">${escapeHtml(story.eyebrow)}</span>
+          <div class="battle-impact" aria-hidden="true">
+            <span class="impact-ring"></span>
+            <strong>VS</strong>
+          </div>
+          <span class="motw-tag">${escapeHtml(story.tag)}</span>
+          <div class="motw-chance" data-motw-chance hidden></div>
+          <p class="motw-reason">${escapeHtml(story.reason)}</p>
+          <button type="button" class="motw-open" data-motw-open>Open lineups</button>
         </div>
-        ${battleFighterMarkup(away, match.awayScore, 'right')}
+        ${battleFighterMarkup(away, match.awayScore, 'right', leader === 'home')}
       </div>
     </div>
   `;
 }
 
-function battleCardMarkup(match, story, index) {
+function battleRowMarkup_(match) {
   const home = state.teamMap.get(Number(match.homeTeamId));
   const away = state.teamMap.get(Number(match.awayTeamId));
+  const leader = battleLeaderSide_(match);
 
   return `
     <article
-      class="battle-card"
-      style="--battle-delay:${index * 90}ms"
+      class="bc-row"
       data-matchup-key="${escapeAttr(battleMatchupKey_(match, match.week || state.selectedWeek))}"
       role="button"
       tabindex="0"
       aria-label="Open FantasyCast for ${escapeAttr(home ? home.name : 'Home')} versus ${escapeAttr(away ? away.name : 'Away')}"
     >
-      <div class="battle-card-tag">${escapeHtml(story.tag)}</div>
-
-      <div class="battle-card-fighters">
-        ${battleMiniFighterMarkup(home, match.homeScore, 'left')}
-        <div class="battle-mini-vs">VS</div>
-        ${battleMiniFighterMarkup(away, match.awayScore, 'right')}
-      </div>
-
-      <div class="battle-card-story">
-        <strong>${escapeHtml(story.title)}</strong>
-        <span>${escapeHtml(story.reason)}</span>
-      </div>
-
-      <div class="battle-status">
-        <span>Week ${match.week || state.selectedWeek}</span>
-        <span>${escapeHtml(matchupStatusLabel_(match))}</span>
-      </div>
-
-      <div class="battle-cast-hint">
-        <span>View FantasyCast</span>
-        <strong>+</strong>
+      <div class="bc-tags"></div>
+      ${battleRowTeamMarkup_(home, match.homeScore, 'home', leader === 'away')}
+      ${battleRowTeamMarkup_(away, match.awayScore, 'away', leader === 'home')}
+      <div class="bc-wb" data-bc-bar hidden><i class="a"></i><i class="b"></i></div>
+      <div class="bc-foot">
+        <span class="bc-foot-home" data-bc-home></span>
+        <span class="mid" data-bc-mid>${escapeHtml(matchupStatusLabel_(match))}</span>
+        <span class="bc-foot-away" data-bc-away></span>
       </div>
     </article>
   `;
 }
 
-function battleFighterMarkup(team, score, side) {
+function battleRowTeamMarkup_(team, score, side, trailing) {
+  if (!team) return `<div class="bc-tl bc-tl-${side}"></div>`;
+
+  return `
+    <div class="bc-tl bc-tl-${side}${trailing ? ' is-trailing' : ''}">
+      <span class="bc-lg"><img class="${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}></span>
+      <div class="nm">
+        <strong>${escapeHtml(team.name)}</strong>
+        <small>${escapeHtml(battleTeamRecord_(team))}</small>
+      </div>
+      <span class="sc">${number2(score)}</span>
+    </div>
+  `;
+}
+
+function battleFighterMarkup(team, score, side, trailing) {
   if (!team) return '<div class="battle-fighter"></div>';
+
+  const record = battleTeamRecord_(team);
 
   return `
     <div class="battle-fighter battle-fighter-${side} ${team.defendingChampion ? 'is-champion' : ''}">
@@ -5539,25 +6150,11 @@ function battleFighterMarkup(team, score, side) {
       <img class="battle-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team.name)} mascot" ${teamIconFallbackAttr(team)}>
       ${team.defendingChampion ? '<span class="fighter-champion">DEFENDING CHAMPION</span>' : ''}
       <h3>${escapeHtml(team.name)}</h3>
-      <p>${escapeHtml(ownerText(team))}</p>
-      <div class="fighter-score">${number2(score)}</div>
+      <p>${escapeHtml(ownerText(team))}${record ? ` · ${escapeHtml(record)}` : ''}</p>
+      <div class="fighter-score${trailing ? ' is-trailing' : ''}">${number2(score)}</div>
     </div>
   `;
 }
-
-function battleMiniFighterMarkup(team, score, side) {
-  if (!team) return '<div class="battle-mini-team"></div>';
-
-  return `
-    <div class="battle-mini-team battle-mini-${side}">
-      <img class="battle-mini-mascot ${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="${escapeAttr(team.name)} mascot" ${teamIconFallbackAttr(team)}>
-      <strong>${escapeHtml(team.name)}</strong>
-      <span>${number2(score)}</span>
-    </div>
-  `;
-}
-
-
 
 function battleMatchupKey_(match, week) {
   if (!match) return '';
@@ -5571,12 +6168,9 @@ function getBattleMatchupByKey_(key) {
 }
 
 function bindBattleFantasyCastCards_(featuredContainer, grid) {
-  const clickable = [
-    ...(featuredContainer ? featuredContainer.querySelectorAll('[data-matchup-key]') : []),
-    ...(grid ? grid.querySelectorAll('[data-matchup-key]') : [])
-  ];
+  const rows = grid ? grid.querySelectorAll('.bc-row[data-matchup-key]') : [];
 
-  clickable.forEach(element => {
+  rows.forEach(element => {
     const activate = () => toggleBattleFantasyCast_(element.dataset.matchupKey);
 
     element.addEventListener('click', event => {
@@ -5590,6 +6184,16 @@ function bindBattleFantasyCastCards_(featuredContainer, grid) {
       activate();
     });
   });
+
+  const stage = featuredContainer ? featuredContainer.querySelector('.motw-stage[data-matchup-key]') : null;
+  const open = featuredContainer ? featuredContainer.querySelector('[data-motw-open]') : null;
+
+  if (stage && open) {
+    open.addEventListener('click', event => {
+      event.stopPropagation();
+      battleOpenCast_(stage.dataset.matchupKey);
+    });
+  }
 }
 
 function bindOverviewFantasyCastCards_(grid) {
@@ -5635,6 +6239,15 @@ function toggleBattleFantasyCast_(key) {
   state.battleCastSelectedKey = key;
   state.battleCastOpen = true;
 
+  // Do not leave the previous matchup's lineups on screen while this one loads.
+  if (!sameMatchup) {
+    const container = document.getElementById('battleFantasyCast');
+    if (container) {
+      container.innerHTML = '';
+      container.classList.remove('is-open');
+    }
+  }
+
   updateBattleCastSelectionUi_();
   loadBattleFantasyCast_(true);
 
@@ -5675,6 +6288,8 @@ function updateBattleCastSelectionUi_() {
       if (icon) icon.textContent = selected ? '−' : '+';
     }
   });
+
+  placeBattleCast_();
 }
 
 function scrollBattleFantasyCastIntoView_() {
@@ -5822,6 +6437,9 @@ async function loadBattleFantasyCast_(force = false) {
 
     detectCastPlays_(week, selected, homeRoster, awayRoster);
 
+    battleRememberTeam_(homeId, homeData);
+    battleRememberTeam_(awayId, awayData);
+
     state.battleCastCache.set(cacheKey, {
       savedAt: Date.now(),
       homeRoster,
@@ -5831,6 +6449,7 @@ async function loadBattleFantasyCast_(force = false) {
     });
 
     renderBattleFantasyCast_(selected, homeRoster, awayRoster, week, homeData, awayData);
+    battleRefreshBoardUi_();
 
     if (shouldShowFantasyCast_(selected, homeRoster, awayRoster)) {
       startBattleFantasyCastPolling_();
@@ -5941,16 +6560,42 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
   const isComplete = starterStatus.complete;
   const anyStarted = starterStatus.anyStarted;
 
+  const homeStarters = homeLineup.starters.filter(Boolean);
+  const awayStarters = awayLineup.starters.filter(Boolean);
+  const homeRemaining = battleRemainingProjection_(homeStarters);
+  const awayRemaining = battleRemainingProjection_(awayStarters);
+  const benchCount = Math.max(homeLineup.bench.length, awayLineup.bench.length);
+  const statusWord = isComplete ? 'COMPLETED' : anyStarted ? 'IN PROGRESS' : 'SCHEDULED';
+
+  // Bench stays collapsed until opened, and is omitted when nobody is benched.
+  const benchMarkup = benchCount
+    ? `
+      <button type="button" class="fantasycast-bench-toggle" data-fantasycast-bench aria-expanded="${state.battleBenchOpen ? 'true' : 'false'}">
+        <span>BENCH · ${benchCount} PLAYER${benchCount === 1 ? '' : 'S'}</span>
+        <strong>${state.battleBenchOpen ? 'Hide ▴' : 'Show ▾'}</strong>
+      </button>
+      <div class="fantasycast-lineups fantasycast-bench"${state.battleBenchOpen ? '' : ' hidden'}>
+        ${Array.from({ length: benchCount }, (_, index) =>
+          fantasyCastMatchupRow_(
+            homeLineup.bench[index] || null,
+            awayLineup.bench[index] || null,
+            'BENCH'
+          )
+        ).join('')}
+      </div>
+    `
+    : '';
+
   container.innerHTML = `
     <div class="fantasycast-shell">
       <div class="fantasycast-topbar">
         <div>
           <span class="fantasycast-live-dot"></span>
-          <strong>${battleFantasyCastModeLabel_(homeRoster, awayRoster)}</strong>
+          <strong>${battleFantasyCastModeLabel_(homeRoster, awayRoster)} · WEEK ${week} · ${statusWord}</strong>
         </div>
 
         <div class="fantasycast-topbar-actions">
-          <span>WEEK ${week} · ${isComplete ? 'COMPLETED' : hasLive ? 'LIVE · AUTO REFRESH 60 SEC' : anyStarted ? 'IN PROGRESS · AUTO REFRESH 60 SEC' : 'SCHEDULED · AUTO REFRESH 60 SEC'}</span>
+          ${isComplete ? '' : '<span>Auto refresh 60 sec</span>'}
           <button type="button" class="fantasycast-refresh-button" data-fantasycast-refresh aria-label="Refresh FantasyCast now">
             <span>Refresh</span>
             <strong>↻</strong>
@@ -5963,21 +6608,23 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
       </div>
 
       <div class="fantasycast-scoreboard">
-        ${fantasyCastTeamHeader_(home, homeScore, homeProjection, 'left', castTeamPerformance_(homeLineup.starters, homeScore))}
+        ${fantasyCastTeamHeader_(home, homeScore, homeProjection, 'left', castTeamPerformance_(homeLineup.starters, homeScore), homeScore + homeRemaining)}
         <div class="fantasycast-center">
           <span>${isComplete ? 'FINAL' : 'CHANCE TO WIN'}</span>
           <strong>${isComplete ? `${number2(homeScore)} <em>VS</em> ${number2(awayScore)}` : `${chance.home}% <em>VS</em> ${chance.away}%`}</strong>
+          ${isComplete ? '' : `<div class="fantasycast-winbar" aria-label="Chance to win"><span style="width:${chance.home}%"></span></div>`}
         </div>
-        ${fantasyCastTeamHeader_(away, awayScore, awayProjection, 'right', castTeamPerformance_(awayLineup.starters, awayScore))}
+        ${fantasyCastTeamHeader_(away, awayScore, awayProjection, 'right', castTeamPerformance_(awayLineup.starters, awayScore), awayScore + awayRemaining)}
       </div>
 
-      <div class="fantasycast-winbar" aria-label="Chance to win">
-        <span style="width:${chance.home}%"></span>
+      <div class="fantasycast-summary">
+        ${fantasyCastSummary_(homeScore, battleStartersLeft_(homeStarters), homeRemaining, 'left')}
+        ${fantasyCastSummary_(awayScore, battleStartersLeft_(awayStarters), awayRemaining, 'right')}
       </div>
 
       <div class="fantasycast-lineup-head">
         <span>${escapeHtml(home ? home.name : 'Home')}</span>
-        <strong>STARTING LINEUPS</strong>
+        <strong>STARTERS</strong>
         <span>${escapeHtml(away ? away.name : 'Away')}</span>
       </div>
 
@@ -5991,16 +6638,7 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
         ).join('')}
       </div>
 
-      <div class="fantasycast-bench-title">BENCH</div>
-      <div class="fantasycast-lineups fantasycast-bench">
-        ${Array.from({ length: Math.max(homeLineup.bench.length, awayLineup.bench.length) }, (_, index) =>
-          fantasyCastMatchupRow_(
-            homeLineup.bench[index] || null,
-            awayLineup.bench[index] || null,
-            'BENCH'
-          )
-        ).join('')}
-      </div>
+      ${benchMarkup}
     </div>
   `;
 
@@ -6011,6 +6649,20 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
   const closeButton = container.querySelector('[data-fantasycast-close]');
   if (closeButton) {
     closeButton.addEventListener('click', () => hideBattleFantasyCast_());
+  }
+
+  const benchToggle = container.querySelector('[data-fantasycast-bench]');
+  if (benchToggle) {
+    benchToggle.addEventListener('click', () => {
+      state.battleBenchOpen = !state.battleBenchOpen;
+
+      const bench = container.querySelector('.fantasycast-bench');
+      if (bench) bench.hidden = !state.battleBenchOpen;
+
+      benchToggle.setAttribute('aria-expanded', state.battleBenchOpen ? 'true' : 'false');
+      const label = benchToggle.querySelector('strong');
+      if (label) label.textContent = state.battleBenchOpen ? 'Hide ▴' : 'Show ▾';
+    });
   }
 
   const refreshButton = container.querySelector('[data-fantasycast-refresh]');
@@ -6024,7 +6676,11 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
   updateBattleCastSelectionUi_();
 }
 
-function fantasyCastTeamHeader_(team, score, projection, side, perf) {
+function fantasyCastSummary_(score, left, remaining, side) {
+  return `<div class="fantasycast-summary-${side}"><b>${number2(score)}</b> in the bank · <b>${left}</b> player${left === 1 ? '' : 's'} yet to play · <b>${remaining.toFixed(1)}</b> projected left</div>`;
+}
+
+function fantasyCastTeamHeader_(team, score, projection, side, perf, projFinal) {
   return `
     <div class="fantasycast-team fantasycast-team-${side}">
       <img class="${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
@@ -6032,7 +6688,7 @@ function fantasyCastTeamHeader_(team, score, projection, side, perf) {
         <strong>${escapeHtml(team ? team.name : 'Unknown Team')}</strong>
         <span>${escapeHtml(team ? ownerText(team) : '')}</span>
         <div class="fantasycast-score${perf ? ` perf-${perf.tier}` : ''}"${perf ? ` title="${escapeAttr(`${perf.delta >= 0 ? '+' : '−'}${Math.abs(perf.delta).toFixed(1)} vs about ${perf.expected.toFixed(1)} projected by now`)}"` : ''}>${number2(score)}</div>${perf ? `<span class="fc-sr">team ${castPerfWords_(perf, true)}</span>` : ''}
-        <small>${projection > 0 ? `PROJ ${projection.toFixed(1)}` : 'PROJECTION PENDING'}</small>
+        <small>${projection > 0 ? `PROJ ${projection.toFixed(1)}` : 'PROJECTION PENDING'}${projection > 0 && projFinal != null ? ` <em>· proj final ${projFinal.toFixed(1)}</em>` : ''}</small>
       </div>
     </div>
   `;
@@ -6106,8 +6762,9 @@ function fantasyCastPlayer_(player, side) {
   const status = battlePlayerStatusLabel_(player);
   const opponent = battlePlayerOpponent_(player);
   const injury = String(player.injuryStatus || '').toUpperCase();
+  const injuryShort = { QUESTIONABLE: 'Q', DOUBTFUL: 'D', INJURY_RESERVE: 'IR', SUSPENSION: 'SUSP' };
   const injuryBadge = injury && injury !== 'ACTIVE'
-    ? `<b class="fantasycast-injury">${escapeHtml(injury)}</b>`
+    ? `<b class="fantasycast-injury${injury === 'OUT' ? ' is-out' : ''}" title="${escapeAttr(injury)}">${escapeHtml(injuryShort[injury] || injury)}</b>`
     : '';
 
   return `
@@ -6247,21 +6904,20 @@ function battlePlayerStatusLabel_(player) {
     return { text: `LIVE${period ? ` · Q${period}` : ''}${clock ? ` ${clock}` : ''}`, className: 'is-live' };
   }
   if (status === 'FINAL' || status === 'POST') {
-    return { text: 'COMPLETED', className: 'is-final' };
+    return { text: 'Completed', className: 'is-final' };
   }
 
   const kickoff = player.kickoff || player.gameTime || player.startTime || '';
   if (kickoff) {
     const date = new Date(kickoff);
     if (!Number.isNaN(date.getTime())) {
-      const day = date.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
-      const md = date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+      const day = date.toLocaleDateString('en-US', { weekday: 'short' });
       const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      return { text: `${day} ${md} · ${time}`, className: 'is-upcoming' };
+      return { text: `${day} ${time}`, className: 'is-upcoming' };
     }
   }
 
-  return { text: 'UPCOMING', className: 'is-upcoming' };
+  return { text: 'Upcoming', className: 'is-upcoming' };
 }
 
 function battlePlayerOpponent_(player) {
@@ -6377,12 +7033,12 @@ function storylineKey(week, firstTeamId, secondTeamId) {
 }
 
 function animateBattleEntrance() {
-  document.querySelectorAll('.battle-fighter, .battle-card').forEach(element => {
+  document.querySelectorAll('.battle-fighter').forEach(element => {
     element.classList.remove('battle-entered');
   });
 
   requestAnimationFrame(() => {
-    document.querySelectorAll('.battle-fighter, .battle-card').forEach(element => {
+    document.querySelectorAll('.battle-fighter').forEach(element => {
       element.classList.add('battle-entered');
     });
   });
