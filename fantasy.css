@@ -8898,3 +8898,324 @@ tr.is-mine .standing-name strong { color: var(--gold-2); }
     margin-left: 6px;
   }
 }
+
+
+/* =========================================================
+   TOUCHDOWN CELEBRATION
+   Banner at the top, a flash on the scoring team in the list,
+   spotlight and FantasyCast, and a persistent TD badge on the
+   scorer's lineup row. Driven by BATTLE_TOUCHDOWN in fantasy.js.
+   ========================================================= */
+
+.td-host {
+  position: fixed;
+  top: 78px;
+  left: 0;
+  right: 0;
+  z-index: 310;
+  display: flex;
+  justify-content: center;
+  padding: 0 12px;
+  pointer-events: none;
+}
+
+.td-banner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: min(560px, 100%);
+  padding: 12px 22px 12px 14px;
+  border: 2px solid var(--gold);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(38,26,4,.97), rgba(8,18,31,.98));
+  box-shadow:
+    0 0 0 1px rgba(255,217,120,.35),
+    0 22px 60px rgba(0,0,0,.6),
+    0 0 46px rgba(245,183,40,.45);
+  opacity: 0;
+  transform: translateY(-26px) scale(.7);
+}
+
+.td-banner.is-in {
+  animation: tdBannerIn .55s cubic-bezier(.2,1.3,.3,1) forwards;
+}
+
+.td-banner.is-out {
+  animation: tdBannerOut .42s ease-in forwards;
+}
+
+.td-banner.is-defense {
+  border-color: #4bb5ff;
+  box-shadow:
+    0 0 0 1px rgba(143,208,255,.35),
+    0 22px 60px rgba(0,0,0,.6),
+    0 0 46px rgba(75,181,255,.45);
+}
+
+.td-banner.is-defense .td-title {
+  color: #8fd0ff;
+  text-shadow: 0 0 24px rgba(75,181,255,.6);
+}
+
+.td-banner.is-inferred {
+  border-color: #6f86a1;
+  box-shadow: 0 22px 60px rgba(0,0,0,.6);
+}
+
+.td-banner.is-inferred .td-title {
+  color: #c5d5e7;
+  font-size: 30px;
+  text-shadow: none;
+}
+
+.td-avatar {
+  display: inline-flex;
+  flex: 0 0 56px;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border: 2px solid rgba(255,209,91,.6);
+  border-radius: 50%;
+  background: #12263d;
+}
+
+.td-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.td-copy {
+  min-width: 0;
+}
+
+.td-title {
+  display: block;
+  color: #ffd15b;
+  font: 800 40px/.95 "Barlow Condensed", sans-serif;
+  letter-spacing: .03em;
+  text-shadow: 0 0 24px rgba(245,183,40,.6);
+}
+
+.td-who {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  font: 800 17px/1.15 Inter, system-ui, sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.td-team {
+  display: block;
+  margin-top: 3px;
+  color: #a9bbd0;
+  font-size: 12.5px;
+}
+
+.td-ball {
+  flex: 0 0 auto;
+  font-size: 34px;
+  animation: tdBall .8s ease-out .15s both;
+}
+
+.td-burst {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.td-burst i {
+  position: absolute;
+  width: 9px;
+  height: 14px;
+  border-radius: 2px;
+  opacity: 0;
+  animation: tdPiece 1.3s cubic-bezier(.15,.7,.3,1) forwards;
+}
+
+@keyframes tdBannerIn {
+  0%   { opacity: 0; transform: translateY(-26px) scale(.7); }
+  60%  { opacity: 1; transform: translateY(4px) scale(1.06); }
+  100% { opacity: 1; transform: none; }
+}
+
+@keyframes tdBannerOut {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateY(-16px) scale(.96); }
+}
+
+@keyframes tdBall {
+  0%   { transform: translateY(-30px) rotate(-200deg) scale(.4); opacity: 0; }
+  60%  { transform: translateY(6px) rotate(12deg) scale(1.15); opacity: 1; }
+  100% { transform: none; opacity: 1; }
+}
+
+@keyframes tdPiece {
+  0%   { opacity: 1; transform: translate(0, 0) rotate(0) scale(1); }
+  100% { opacity: 0; transform: translate(var(--dx), calc(var(--dy) + 70px)) rotate(var(--rot)) scale(.6); }
+}
+
+/* ---------- the scoring team lights up ---------- */
+.battle-center .bc-tl.is-td {
+  animation: tdRowFlash 2.4s ease-out;
+}
+
+.battle-center .bc-tl.is-td .bc-lg {
+  animation: tdHop .9s ease-out;
+}
+
+.battle-center .battle-fighter.is-td .fighter-aura {
+  opacity: .95;
+  background: rgba(245,183,40,.9);
+  animation: tdAura 2.4s ease-out;
+}
+
+.battle-center .battle-fighter.is-td::before {
+  content: "";
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  z-index: 0;
+  width: 280px;
+  height: 280px;
+  border: 3px solid rgba(255,209,91,.9);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(.3);
+  animation: tdRing 1.2s ease-out;
+}
+
+.battle-center .fantasycast-team.is-td img {
+  animation: tdHop .9s ease-out, tdGlow 2.4s ease-out;
+}
+
+.battle-center .fantasycast-player.is-td-fresh {
+  animation: tdRowFlash 2.6s ease-out;
+}
+
+.battle-center .fantasycast-td {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background: rgba(245,183,40,.2);
+  color: var(--gold-2);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+
+@keyframes tdRowFlash {
+  0%   { background: rgba(245,183,40,0); box-shadow: 0 0 0 0 rgba(245,183,40,0); }
+  12%  { background: rgba(245,183,40,.34); box-shadow: 0 0 0 1px rgba(245,183,40,.65), 0 0 24px rgba(245,183,40,.45); }
+  100% { background: rgba(245,183,40,0); box-shadow: 0 0 0 0 rgba(245,183,40,0); }
+}
+
+@keyframes tdHop {
+  0%   { transform: scale(1); }
+  30%  { transform: translateY(-9px) scale(1.18); }
+  60%  { transform: translateY(0) scale(.96); }
+  100% { transform: scale(1); }
+}
+
+@keyframes tdAura {
+  0%   { opacity: .28; transform: scale(1); }
+  18%  { opacity: .95; transform: scale(1.35); }
+  100% { opacity: .28; transform: scale(1); }
+}
+
+@keyframes tdRing {
+  0%   { opacity: .9; transform: translate(-50%, -50%) scale(.3); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
+}
+
+@keyframes tdGlow {
+  0%   { box-shadow: 0 0 0 0 rgba(245,183,40,0); }
+  20%  { box-shadow: 0 0 0 5px rgba(245,183,40,.55), 0 0 30px rgba(245,183,40,.8); }
+  100% { box-shadow: 0 0 0 0 rgba(245,183,40,0); }
+}
+
+@media (max-width: 760px) {
+  .td-host {
+    top: 122px;
+  }
+
+  .td-banner {
+    gap: 10px;
+    padding: 10px 14px 10px 10px;
+  }
+
+  .td-avatar {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+  }
+
+  .td-title {
+    font-size: 30px;
+  }
+
+  .td-who {
+    font-size: 15px;
+  }
+
+  .td-ball {
+    font-size: 26px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .td-banner {
+    opacity: 1;
+    transform: none;
+  }
+
+  .td-banner.is-in,
+  .td-banner.is-out,
+  .td-ball,
+  .battle-center .bc-tl.is-td,
+  .battle-center .bc-tl.is-td .bc-lg,
+  .battle-center .battle-fighter.is-td .fighter-aura,
+  .battle-center .battle-fighter.is-td::before,
+  .battle-center .fantasycast-team.is-td img,
+  .battle-center .fantasycast-player.is-td-fresh {
+    animation: none !important;
+  }
+
+  .td-banner.is-out {
+    opacity: 0;
+    transition: opacity .3s ease;
+  }
+
+  .battle-center .bc-tl.is-td,
+  .battle-center .fantasycast-player.is-td-fresh {
+    background: rgba(245,183,40,.22);
+  }
+}
+
+/* touchdown count unavailable (roster API sent no counts) */
+.battle-center .fantasycast-td-na {
+  color: #6f86a1;
+  font-style: italic;
+}
+
+.battle-center .fantasycast-td-part {
+  white-space: nowrap;
+}
+
+/* stat line under a live player, like ESPN: "232 YDS, 1 PASS TD" */
+.battle-center .fantasycast-player-main > .fantasycast-statline {
+  display: block;
+  margin-top: 3px;
+  color: #dbe6f3;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: .01em;
+}

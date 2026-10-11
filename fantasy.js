@@ -190,6 +190,14 @@ const state = {
   battleBoardTimer: null,
   battleBenchOpen: false,
   battleKickoffAsked: false,
+  tdMemory: new Map(),
+  tdFresh: new Map(),
+  tdFreshTeams: new Map(),
+  tdFlashPlayers: new Set(),
+  tdFlashTeams: new Set(),
+  tdApiWarned: false,
+  tdQueue: [],
+  tdShowing: false,
   scoreSyncTimer: null,
 
   // Resilience layer
@@ -1167,7 +1175,9 @@ function detectCastPlays_(week, match, homeRoster, awayRoster) {
       if (!previous || (now - previous.at) > SCORE_MEMORY_MAX_AGE_MS) return;
 
       const gain = points - previous.points;
-      if (gain >= 0.1) events.push({ name: player.name || 'A starter', gain, teamId: Number(teamId) });
+      if (gain >= 0.1 && !battleTdIsFresh_(player.playerId)) {
+        events.push({ name: player.name || 'A starter', gain, teamId: Number(teamId) });
+      }
     });
   });
 
@@ -5797,8 +5807,86 @@ function battleBoardEntryFromRoster_(data) {
   };
 }
 
+function battleRosterHasTouchdownData_(roster) {
+  return (roster || []).some(player => player && (
+    Object.prototype.hasOwnProperty.call(player, 'touchdowns') ||
+    Object.prototype.hasOwnProperty.call(player, 'statMap')
+  ));
+}
+
 function battleRememberTeam_(teamId, data) {
   state.battleBoard.set(Number(teamId), battleBoardEntryFromRoster_(data));
+
+  const roster = Array.isArray(data && data.roster) ? data.roster : [];
+
+  if (roster.length && !state.tdApiWarned && !battleRosterHasTouchdownData_(roster)) {
+    state.tdApiWarned = true;
+    console.warn(
+      '[Battle Center] The roster API sent no "touchdowns" or "statMap" fields, so touchdown ' +
+      'counts, stat lines and the touchdown effect are off. Add the two fields from ' +
+      'Code_touchdown_patch.gs to getTeamRoster_ in Code.gs and deploy a New version. ' +
+      'Run battleDebugRoster() to see exactly what the API sends.'
+    );
+  }
+}
+
+// Console helper: battleDebugRoster(). Lists every player the FantasyCast has
+// loaded and whether the API sent the touchdown fields for him.
+function battleDebugRoster() {
+  const rows = [];
+
+  state.battleCastCache.forEach((entry, key) => {
+    [['home', entry.homeData], ['away', entry.awayData]].forEach(([side, data]) => {
+      (data && Array.isArray(data.roster) ? data.roster : []).forEach(player => {
+        rows.push({
+          matchup: key,
+          side,
+          liveSource: data.liveRosterSource,
+          liveEntries: data.liveRosterEntryCount,
+          player: player.name,
+          slot: player.lineupSlot,
+          status: player.gameStatus,
+          points: player.fantasyPoints,
+          touchdowns: 'touchdowns' in player ? player.touchdowns : '(field missing)',
+          statMap: 'statMap' in player
+            ? (player.statMap ? JSON.stringify(player.statMap) : 'null')
+            : '(field missing)'
+        });
+      });
+    });
+  });
+
+  if (!rows.length) {
+    console.log('No FantasyCast roster is loaded yet. Open a matchup on the Battle tab first.');
+    return null;
+  }
+
+  console.table(rows);
+
+  const summary = {
+    players: rows.length,
+    withTouchdownsField: rows.filter(row => row.touchdowns !== '(field missing)').length,
+    withStatMapField: rows.filter(row => row.statMap !== '(field missing)').length,
+    rostersFromLiveBoxscore: rows.filter(row => row.liveSource === 'rosterForCurrentScoringPeriod').length,
+    rostersFromFallback: rows.filter(row => row.liveSource === 'baseRosterFallback').length
+  };
+
+  if (summary.rostersFromFallback) {
+    console.warn(
+      summary.rostersFromFallback + ' of ' + rows.length + ' players came from "baseRosterFallback": the roster API ' +
+      'found no live boxscore entries, so points, stat lines and touchdown counts are missing. ' +
+      'Apply STEP 2A (the week filter in getTeamRoster_) from Code_touchdown_patch.gs.'
+    );
+  }
+
+  console.log(
+    summary.withTouchdownsField || summary.withStatMapField
+      ? 'The API IS sending the fields: ' + JSON.stringify(summary)
+      : 'The API is NOT sending the fields (0 of ' + summary.players + ' players). ' +
+        'The Code.gs change is not in the deployed version.'
+  );
+
+  return summary;
 }
 
 function battleBoardEntry_(teamId) {
@@ -5904,7 +5992,9 @@ async function loadBattleBoardData_() {
 
       await Promise.all(stale.slice(i, i + 2).map(async teamId => {
         try {
-          battleRememberTeam_(teamId, await api_('roster', { teamId }));
+          const data = await api_('roster', { teamId });
+          battleDetectTouchdowns_(week, teamId, Array.isArray(data && data.roster) ? data.roster : [], data && data.liveRosterSource);
+          battleRememberTeam_(teamId, data);
         } catch (error) {
           // A team that fails to load just shows no win chance.
         }
@@ -5979,6 +6069,367 @@ function updateBattleHero_(matchups, week) {
       .catch(() => {})
       .finally(() => { state.battleKickoffAsked = false; });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Touchdown celebration
+// A touchdown is announced when a starter's `touchdowns` count goes UP between
+// two refreshes. The roster API has to supply that count: the page otherwise
+// only sees fantasy points, and a point jump cannot prove a touchdown (a 65-yard
+// run is +6.5 with no score; a D/ST interception plus a bonus swing is
+// ambiguous). First sightings and stale baselines never celebrate, so opening
+// the page mid-game does not replay old scores.
+// ---------------------------------------------------------------------------
+const BATTLE_TOUCHDOWN = {
+  enabled: true,
+  // OFF: only a real `touchdowns` increase is announced.
+  // ON: when a player carries NO touchdown data, one refresh that adds
+  // inferMinGain or more points is announced as a PROBABLE touchdown. A long
+  // run or a defensive bonus can trip that, which is why it is off by default.
+  inferFromPoints: false,
+  inferMinGain: 6,
+  // Used only when the API sends the raw stat map (statMap) but no ready-made
+  // `touchdowns` count. Same ESPN stat ids the backend counts.
+  includePassing: true,
+  statIds: { passing: [4], other: [25, 43, 63, 93, 101, 102, 103, 104] },
+  bannerMs: 3200,
+  flashMs: 2400,
+  freshMs: 9000,
+  maxQueue: 4
+};
+
+function battleTouchdownsFromStatMap_(map) {
+  const ids = (BATTLE_TOUCHDOWN.includePassing ? BATTLE_TOUCHDOWN.statIds.passing : [])
+    .concat(BATTLE_TOUCHDOWN.statIds.other);
+
+  return ids.reduce((sum, id) => {
+    const value = Number(map[String(id)]);
+    return Number.isFinite(value) && value > 0 ? sum + value : sum;
+  }, 0);
+}
+
+function battlePlayerTouchdowns_(player) {
+  if (!player) return null;
+
+  const sources = [player, player.stats && typeof player.stats === 'object' ? player.stats : null];
+
+  for (const source of sources) {
+    if (!source) continue;
+
+    for (const key of ['touchdowns', 'totalTouchdowns', 'tds']) {
+      const value = source[key];
+      if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))) {
+        return Math.max(0, Number(value));
+      }
+    }
+  }
+
+  // No ready-made count: derive it from the raw stats the API sent.
+  if (player.statMap && typeof player.statMap === 'object') {
+    return battleTouchdownsFromStatMap_(player.statMap);
+  }
+
+  return null;
+}
+
+// ESPN stat ids for the stat line under a player. These come from ESPN's public
+// stat-id map; run "Test Touchdown Field" in Apps Script and compare its
+// statMap output with ESPN's own lines to confirm them for this league.
+const BATTLE_STAT = Object.freeze({
+  passYds: 3, passTd: 4, intThrown: 20,
+  rushYds: 24, rushTd: 25, recYds: 42,
+  fgMade: 83, fgAtt: 84, xpMade: 86, xpAtt: 87,
+  dstInt: 95, dstFumRec: 96, dstSack: 99,
+  dstPa: 120, dstPaZero: 89
+});
+
+// "232 YDS, 1 PASS TD" for a QB, "165 YDS, 2 TOT TD" for a runner or receiver,
+// "0/0 FG, 1/1 XP" for a kicker. Empty until the player's game has started and
+// the API has sent his stats, so nothing is ever guessed.
+function battleStatLine_(player) {
+  const map = player && player.statMap;
+  if (!map || typeof map !== 'object' || !Object.keys(map).length) return '';
+
+  const status = battlePlayerGameStatus_(player);
+  if (!['LIVE', 'IN_PROGRESS', 'FINAL', 'POST'].includes(status)) return '';
+
+  const n = id => Number(map[String(id)]) || 0;
+  const position = String(player.position || '').toUpperCase();
+  const parts = [];
+
+  if (position === 'QB') {
+    parts.push(`${Math.round(n(BATTLE_STAT.passYds))} YDS`);
+    if (n(BATTLE_STAT.passTd)) parts.push(`${n(BATTLE_STAT.passTd)} PASS TD`);
+    if (n(BATTLE_STAT.rushTd)) parts.push(`${n(BATTLE_STAT.rushTd)} RUSH TD`);
+    if (n(BATTLE_STAT.intThrown)) parts.push(`${n(BATTLE_STAT.intThrown)} INT`);
+  } else if (['RB', 'WR', 'TE'].includes(position)) {
+    // ESPN shows ONE yardage number. Bucky Irving had 165 rushing and 10 receiving
+    // yards and ESPN showed "165 YDS" (not 175), so it is not the sum. The larger
+    // of the two is used: the runner's rushing yards, the receiver's receiving yards.
+    parts.push(`${Math.round(Math.max(n(BATTLE_STAT.rushYds), n(BATTLE_STAT.recYds)))} YDS`);
+    const touchdowns = battleTouchdownsFromStatMap_(map);
+    if (touchdowns) parts.push(`${touchdowns} TOT TD`);
+  } else if (position === 'K') {
+    parts.push(`${n(BATTLE_STAT.fgMade)}/${n(BATTLE_STAT.fgAtt)} FG`);
+    parts.push(`${n(BATTLE_STAT.xpMade)}/${n(BATTLE_STAT.xpAtt)} XP`);
+  } else if (position === 'D/ST' || position === 'DST') {
+    // Points allowed: stat 120 when it is non-zero, or the "0 points allowed" tier
+    // (stat 89) when the defense has not given up a point. Zero values are dropped
+    // from the stat map, so a missing 120 alone does not mean "unknown".
+    const pointsAllowed = n(BATTLE_STAT.dstPa) || (n(BATTLE_STAT.dstPaZero) ? 0 : null);
+    if (pointsAllowed != null) parts.push(`${pointsAllowed} PA`);
+    if (n(BATTLE_STAT.dstSack)) parts.push(`${n(BATTLE_STAT.dstSack)} SACK`);
+    if (n(BATTLE_STAT.dstInt)) parts.push(`${n(BATTLE_STAT.dstInt)} INT`);
+    if (n(BATTLE_STAT.dstFumRec)) parts.push(`${n(BATTLE_STAT.dstFumRec)} FR`);
+    const touchdowns = battleTouchdownsFromStatMap_(map);
+    if (touchdowns) parts.push(`${touchdowns} TD`);
+  }
+
+  return parts.join(', ');
+}
+
+function battleTdIsFresh_(playerId) {
+  return (state.tdFresh.get(String(playerId)) || 0) > Date.now();
+}
+
+function battleTdTeamIsFresh_(teamId) {
+  return (state.tdFreshTeams.get(Number(teamId)) || 0) > Date.now();
+}
+
+// The FantasyCast panel is rebuilt on every refresh. The flash should play once,
+// on the render that follows the detection, not again on a later refresh.
+function battleTdTakePlayerFlash_(playerId) {
+  const id = String(playerId);
+  if (!state.tdFlashPlayers.has(id)) return false;
+  state.tdFlashPlayers.delete(id);
+  return battleTdIsFresh_(id);
+}
+
+function battleTdTakeTeamFlash_(teamId) {
+  const id = Number(teamId);
+  if (!state.tdFlashTeams.has(id)) return false;
+  state.tdFlashTeams.delete(id);
+  return battleTdTeamIsFresh_(id);
+}
+
+function battleDetectTouchdowns_(week, teamId, roster, rosterSource) {
+  if (!BATTLE_TOUCHDOWN.enabled) return;
+
+  // A roster built without the live boxscore carries no stats at all. Treating it
+  // as "nothing scored" would make the next good payload look like fresh touchdowns.
+  if (String(rosterSource || '') === 'baseRosterFallback') return;
+
+  const now = Date.now();
+
+  normalizeBattleLineup_(roster).starters.filter(Boolean).forEach(player => {
+    if (player.playerId == null || player.playerId === '') return;
+
+    const key = `${Number(week)}:${Number(teamId)}:${player.playerId}`;
+    const count = battlePlayerTouchdowns_(player);
+    const points = battlePlayerActualPoints_(player);
+    const started = ['LIVE', 'IN_PROGRESS', 'FINAL', 'POST'].includes(battlePlayerGameStatus_(player));
+    const previous = state.tdMemory.get(key);
+
+    // A count we already know is never replaced by "unknown" (a payload that lost
+    // its stats for one refresh). Keep the last known value and wait for the next.
+    if (count == null && previous && previous.count != null) return;
+
+    state.tdMemory.set(key, { count, points, started, at: now });
+
+    // First sighting, or a baseline too old to trust: remember, never celebrate.
+    if (!previous || (now - previous.at) > SCORE_MEMORY_MAX_AGE_MS) return;
+
+    // A player who had not kicked off has no points yet; that baseline is zero.
+    // A player who HAD started but reported none is unknown, not zero.
+    let gain = null;
+    if (points != null) {
+      if (previous.points != null) gain = points - previous.points;
+      else if (!previous.started) gain = points;
+    }
+
+    let touchdowns = 0;
+    let inferred = false;
+
+    // No count before means "nothing recorded yet" while the starter had not kicked
+    // off or had no points (ESPN adds a stat row with his first stat, which can
+    // already be a touchdown). With points but no count it is unknown, so an old
+    // touchdown is never replayed.
+    const baseline = previous.count != null
+      ? previous.count
+      : (!previous.started || !(previous.points > 0) ? 0 : null);
+
+    if (count != null && baseline != null) {
+      touchdowns = count - baseline;
+    } else if (
+      BATTLE_TOUCHDOWN.inferFromPoints &&
+      count == null &&
+      gain != null &&
+      gain >= BATTLE_TOUCHDOWN.inferMinGain
+    ) {
+      touchdowns = 1;
+      inferred = true;
+    }
+
+    if (!(touchdowns > 0)) return;
+
+    battleCelebrateTouchdown_({
+      playerId: player.playerId,
+      name: player.name || 'A starter',
+      teamId: Number(teamId),
+      defense: battleSlotMatches_(player, 'D/ST'),
+      touchdowns,
+      gain,
+      inferred
+    });
+  });
+}
+
+function battleCelebrateTouchdown_(event) {
+  const now = Date.now();
+
+  // Used by the FantasyCast re-render that follows a refresh, and to keep the
+  // generic "+6.3 pts" toast from repeating what the banner already says.
+  state.tdFresh.set(String(event.playerId), now + BATTLE_TOUCHDOWN.freshMs);
+  state.tdFreshTeams.set(Number(event.teamId), now + BATTLE_TOUCHDOWN.freshMs);
+  state.tdFlashPlayers.add(String(event.playerId));
+  state.tdFlashTeams.add(Number(event.teamId));
+
+  battleTdFlashTeam_(event.teamId);
+
+  if (document.hidden) return;
+  if (state.tdQueue.length >= BATTLE_TOUCHDOWN.maxQueue) return;
+
+  state.tdQueue.push(event);
+  pumpTouchdownBanners_();
+}
+
+function battleTdFlashTeam_(teamId) {
+  const id = Number(teamId);
+  const ms = BATTLE_TOUCHDOWN.flashMs;
+
+  const add = element => {
+    if (!element) return;
+    element.classList.add('is-td');
+    window.setTimeout(() => element.classList.remove('is-td'), ms);
+  };
+
+  const sideOf = key => {
+    const match = /:(\d+)-(\d+)$/.exec(String(key || ''));
+    if (!match) return '';
+    return Number(match[1]) === id ? 'home' : Number(match[2]) === id ? 'away' : '';
+  };
+
+  document.querySelectorAll('#battleGrid .bc-row').forEach(row => {
+    const side = sideOf(row.dataset.matchupKey);
+    if (side) add(row.querySelector(`.bc-tl-${side}`));
+  });
+
+  const stage = document.querySelector('#battleFeatured .motw-stage');
+  if (stage) {
+    const side = sideOf(stage.dataset.matchupKey);
+    if (side) add(stage.querySelector(side === 'home' ? '.battle-fighter-left' : '.battle-fighter-right'));
+  }
+}
+
+function ensureTouchdownHost_() {
+  let host = document.getElementById('tdHost');
+
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'tdHost';
+    host.className = 'td-host';
+    document.body.appendChild(host);
+  }
+
+  return host;
+}
+
+function pumpTouchdownBanners_() {
+  if (state.tdShowing || !state.tdQueue.length) return;
+
+  const event = state.tdQueue.shift();
+  const team = state.teamMap.get(Number(event.teamId));
+  const reduced = motionReduced_();
+
+  state.tdShowing = true;
+
+  const title = event.inferred
+    ? 'PROBABLE TOUCHDOWN'
+    : event.defense
+      ? 'DEFENSIVE TOUCHDOWN!'
+      : event.touchdowns > 1
+        ? `${event.touchdowns} TOUCHDOWNS!`
+        : 'TOUCHDOWN!';
+
+  const detail = [
+    team ? team.name : '',
+    event.gain != null && event.gain > 0 ? `+${number2(event.gain)} pts` : ''
+  ].filter(Boolean).join(' · ');
+
+  const element = document.createElement('div');
+  element.className = `td-banner${event.inferred ? ' is-inferred' : ''}${event.defense ? ' is-defense' : ''}`;
+  element.setAttribute('role', 'status');
+  element.innerHTML = `
+    <span class="td-burst" aria-hidden="true"></span>
+    ${team ? `<span class="td-avatar"><img class="${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}></span>` : ''}
+    <div class="td-copy">
+      <strong class="td-title">${escapeHtml(title)}</strong>
+      <span class="td-who">${escapeHtml(event.name)}</span>
+      <small class="td-team">${escapeHtml(detail)}${event.inferred ? `${detail ? ' · ' : ''}estimated from the points jump` : ''}</small>
+    </div>
+    <span class="td-ball" aria-hidden="true">🏈</span>
+  `;
+
+  ensureTouchdownHost_().appendChild(element);
+
+  if (!reduced) battleTdBurst_(element.querySelector('.td-burst'));
+
+  window.requestAnimationFrame(() => element.classList.add('is-in'));
+  window.setTimeout(() => element.classList.add('is-out'), BATTLE_TOUCHDOWN.bannerMs - 450);
+
+  window.setTimeout(() => {
+    element.remove();
+    state.tdShowing = false;
+    window.setTimeout(pumpTouchdownBanners_, 150);
+  }, BATTLE_TOUCHDOWN.bannerMs);
+}
+
+function battleTdBurst_(host) {
+  if (!host) return;
+
+  const colors = ['#ffd15b', '#f5b728', '#ffffff', '#4bb5ff', '#ff6b7e'];
+  const count = 22;
+
+  for (let i = 0; i < count; i += 1) {
+    const piece = document.createElement('i');
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.4;
+    const distance = 70 + Math.random() * 90;
+
+    piece.style.setProperty('--dx', `${Math.round(Math.cos(angle) * distance)}px`);
+    piece.style.setProperty('--dy', `${Math.round(Math.sin(angle) * distance * 0.7 - 20)}px`);
+    piece.style.setProperty('--rot', `${Math.round(Math.random() * 540 - 270)}deg`);
+    piece.style.background = colors[i % colors.length];
+    piece.style.animationDelay = `${Math.round(Math.random() * 90)}ms`;
+    host.appendChild(piece);
+  }
+}
+
+// Console helper: battleTouchdownPreview() or battleTouchdownPreview('defense')
+function battleTouchdownPreview(kind) {
+  const stage = document.querySelector('#battleFeatured .motw-stage');
+  const match = stage ? getBattleMatchupByKey_(stage.dataset.matchupKey) : null;
+  const teamId = match ? Number(match.homeTeamId) : Number((state.teams[0] || {}).id);
+  const defense = kind === 'defense';
+
+  battleCelebrateTouchdown_({
+    playerId: `preview-${Date.now()}`,
+    name: defense ? 'Preview D/ST' : 'Preview Player',
+    teamId,
+    defense,
+    touchdowns: 1,
+    gain: 6.4,
+    inferred: false
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -6435,6 +6886,8 @@ async function loadBattleFantasyCast_(force = false) {
       return;
     }
 
+    battleDetectTouchdowns_(week, homeId, homeRoster, homeData && homeData.liveRosterSource);
+    battleDetectTouchdowns_(week, awayId, awayRoster, awayData && awayData.liveRosterSource);
     detectCastPlays_(week, selected, homeRoster, awayRoster);
 
     battleRememberTeam_(homeId, homeData);
@@ -6618,8 +7071,8 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
       </div>
 
       <div class="fantasycast-summary">
-        ${fantasyCastSummary_(homeScore, battleStartersLeft_(homeStarters), homeRemaining, 'left')}
-        ${fantasyCastSummary_(awayScore, battleStartersLeft_(awayStarters), awayRemaining, 'right')}
+        ${fantasyCastSummary_(homeScore, battleStartersLeft_(homeStarters), homeRemaining, 'left', battleTeamTouchdowns_(homeStarters))}
+        ${fantasyCastSummary_(awayScore, battleStartersLeft_(awayStarters), awayRemaining, 'right', battleTeamTouchdowns_(awayStarters))}
       </div>
 
       <div class="fantasycast-lineup-head">
@@ -6676,13 +7129,34 @@ function renderBattleFantasyCast_(match, homeRoster, awayRoster, week, homeData 
   updateBattleCastSelectionUi_();
 }
 
-function fantasyCastSummary_(score, left, remaining, side) {
-  return `<div class="fantasycast-summary-${side}"><b>${number2(score)}</b> in the bank · <b>${left}</b> player${left === 1 ? '' : 's'} yet to play · <b>${remaining.toFixed(1)}</b> projected left</div>`;
+// Touchdowns across a team's starters. null when the API sent no count for any
+// of them, which the panel shows as "TD n/a" instead of a misleading 0.
+function battleTeamTouchdowns_(starters) {
+  let known = false;
+  let total = 0;
+
+  starters.forEach(player => {
+    const count = battlePlayerTouchdowns_(player);
+    if (count == null) return;
+    known = true;
+    total += count;
+  });
+
+  return known ? total : null;
+}
+
+function fantasyCastSummary_(score, left, remaining, side, touchdowns) {
+  // The dot travels with the count so a narrow box never strands it on the previous line.
+  const td = touchdowns == null
+    ? ' <span class="fantasycast-td-part">· <span class="fantasycast-td-na" title="The roster API did not send touchdown counts. Run battleDebugRoster() in the console.">TD n/a</span></span>'
+    : ` <span class="fantasycast-td-part">· <b>${touchdowns}</b> TD</span>`;
+
+  return `<div class="fantasycast-summary-${side}"><b>${number2(score)}</b> in the bank · <b>${left}</b> player${left === 1 ? '' : 's'} yet to play · <b>${remaining.toFixed(1)}</b> projected left${td}</div>`;
 }
 
 function fantasyCastTeamHeader_(team, score, projection, side, perf, projFinal) {
   return `
-    <div class="fantasycast-team fantasycast-team-${side}">
+    <div class="fantasycast-team fantasycast-team-${side}${team && battleTdTakeTeamFlash_(team.id) ? ' is-td' : ''}">
       <img class="${teamIconClass(team)}" src="${escapeAttr(getTeamIcon(team))}" alt="" ${teamIconFallbackAttr(team)}>
       <div>
         <strong>${escapeHtml(team ? team.name : 'Unknown Team')}</strong>
@@ -6762,17 +7236,25 @@ function fantasyCastPlayer_(player, side) {
   const status = battlePlayerStatusLabel_(player);
   const opponent = battlePlayerOpponent_(player);
   const injury = String(player.injuryStatus || '').toUpperCase();
+  const touchdowns = battlePlayerTouchdowns_(player);
+  const tdBadge = touchdowns > 0
+    ? `<b class="fantasycast-td" title="${escapeAttr(`${touchdowns} touchdown${touchdowns === 1 ? '' : 's'}`)}">${touchdowns} TD</b>`
+    : '';
+  const tdFresh = battleTdTakePlayerFlash_(player.playerId) ? ' is-td-fresh' : '';
+  const statLine = battleStatLine_(player);
+
   const injuryShort = { QUESTIONABLE: 'Q', DOUBTFUL: 'D', INJURY_RESERVE: 'IR', SUSPENSION: 'SUSP' };
-  const injuryBadge = injury && injury !== 'ACTIVE'
+  const injuryBadge = injury && !['ACTIVE', 'NORMAL', 'HEALTHY'].includes(injury)
     ? `<b class="fantasycast-injury${injury === 'OUT' ? ' is-out' : ''}" title="${escapeAttr(injury)}">${escapeHtml(injuryShort[injury] || injury)}</b>`
     : '';
 
   return `
-    <div class="fantasycast-player fantasycast-player-${side}">
+    <div class="fantasycast-player fantasycast-player-${side}${tdFresh}">
       <div class="fantasycast-player-main">
         <strong>${escapeHtml(player.name || 'Unknown Player')}</strong>
-        ${injuryBadge}
+        ${tdBadge}${injuryBadge}
         <span>${escapeHtml(player.proTeam || player.proTeamAbbrev || '')}${opponent ? ` · ${escapeHtml(opponent)}` : ''}</span>
+        ${statLine ? `<em class="fantasycast-statline">${escapeHtml(statLine)}</em>` : ''}
         <small class="${status.className}">${escapeHtml(status.text)}</small>
       </div>
       <div class="fantasycast-player-score">
