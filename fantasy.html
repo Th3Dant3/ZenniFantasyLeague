@@ -11,7 +11,7 @@
   <!-- Returning visitors: hide the intro loader before first paint so cached data shows instantly. -->
   <script>try{if(localStorage.getItem('ZENNI_FANTASY_LEAGUE_LAST_GOOD_V1')){document.documentElement.classList.add('has-warm-cache');}}catch(e){}</script>
   <style>html.has-warm-cache #leagueLoader{display:none!important}html.has-warm-cache body.is-loading{overflow:auto!important}</style>
-  <link rel="stylesheet" href="fantasy.css">
+  <link rel="stylesheet" href="fantasy.css?v=20261110-playoff-odds">
 </head>
 <body>
 
@@ -376,6 +376,7 @@
           <div class="st-panel" id="stPanel-standings" role="tabpanel" aria-labelledby="stTab-standings" data-st-panel="standings">
             <section class="st-insights" id="glanceRibbon" aria-label="League insights"></section>
             <div class="st-legend" id="stLegend"></div>
+            <section class="st-odds" id="stOdds" aria-label="Estimated playoff qualification probabilities" aria-live="polite"></section>
             <div class="st-conf-grid" id="stConfGrid"></div>
           </div>
 
@@ -500,6 +501,6 @@
 
   <div class="live-toasts" id="liveToasts" aria-live="polite"></div>
 
-  <script src="fantasy.js"></script>
+  <script src="fantasy.js?v=20261110-playoff-odds"></script>
 </body>
 </html>

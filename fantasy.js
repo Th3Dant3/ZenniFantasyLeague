@@ -7788,6 +7788,169 @@ function buildStandingsModel_() {
   };
 }
 
+/* ---------- Playoff odds: schedule-based Monte Carlo estimate (NOT ESPN official) ---------- */
+const ST_ODDS_TRIALS = 6000;
+const stOddsState_ = { key: '', result: null, loading: false, error: '', token: 0 };
+
+function stOddsSignature_(model) {
+  if (!model || model.playoffTeams !== 8 || model.rows.length !== 12) return '';
+  return [model.through, Number(state.league && state.league.regularSeasonWeeks || 14),
+    ...model.rows.slice().sort((a,b) => Number(a.teamId)-Number(b.teamId))
+      .map(r => [r.teamId, r.divisionId, r.seed, r.wins, r.losses, r.ties, Number(r.pointsFor || 0).toFixed(2)].join(':'))
+  ].join('|');
+}
+
+// Reproducible RNG: refreshing the same standings and schedule never makes odds jump.
+function stOddsRandom_(seed) {
+  let x = seed >>> 0;
+  return () => {
+    x += 0x6D2B79F5;
+    let t = x;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function stOddsNormal_(random) {
+  return Math.sqrt(-2 * Math.log(Math.max(1e-10, random()))) * Math.cos(2 * Math.PI * random());
+}
+
+function stOddsSimulate_(model, weeks) {
+  const teams = model.rows.slice();
+  const ids = teams.map(r => Number(r.teamId));
+  const idSet = new Set(ids);
+  const remaining = Math.max(0, Number(state.league && state.league.regularSeasonWeeks || 14) - model.through);
+  if (idSet.size !== 12 || weeks.length !== remaining) throw new Error('Incomplete season schedule.');
+  const schedule = [];
+  weeks.forEach((item, offset) => {
+    const matches = item.matchups || [];
+    const seen = new Set();
+    const pairs = [];
+    matches.forEach(m => {
+      const home = Number(m.homeTeamId), away = Number(m.awayTeamId);
+      if (!idSet.has(home) || !idSet.has(away) || home === away || seen.has(home) || seen.has(away)) return;
+      seen.add(home); seen.add(away); pairs.push([ids.indexOf(home), ids.indexOf(away)]);
+    });
+    if (pairs.length !== 6 || seen.size !== 12) {
+      throw new Error(`ESPN Week ${model.through + offset + 1} has an incomplete schedule. Cannot calculate reliable odds.`);
+    }
+    schedule.push(pairs);
+  });
+  const games = teams.map(stGames_);
+  const leagueAvg = teams.reduce((total,r,i) => total + Number(r.pointsFor || 0),0) /
+    Math.max(1, games.reduce((a,b) => a+b,0));
+  // Shrink observed points per game toward the league average, particularly early in the season.
+  const means = teams.map((r,i) => {
+    const played = games[i];
+    const observed = played ? Number(r.pointsFor || 0) / played : leagueAvg;
+    return Math.max(55, Math.min(230, (observed * played + leagueAvg * 3) / (played + 3)));
+  });
+  // 30-point weekly standard deviation is a transparent modelling assumption, not an ESPN metric.
+  const std = 30;
+  const seedString = stOddsSignature_(model) + '|' + schedule.map(w => w.map(p=>p.join('-')).join(',')).join('|');
+  let hash = 2166136261;
+  for (let i = 0; i < seedString.length; i++) hash = Math.imul(hash ^ seedString.charCodeAt(i), 16777619);
+  const random = stOddsRandom_(hash);
+  const counts = new Array(teams.length).fill(0);
+  if (!remaining) {
+    teams.forEach((r,i) => { counts[i] = r.seed != null && r.seed <= 8 ? 1 : 0; });
+    return { through:model.through, remaining:0, trials:1,
+      percentages:Object.fromEntries(teams.map((r,i)=>[Number(r.teamId),counts[i]*100])) };
+  }
+  const sims = ST_ODDS_TRIALS;
+  for (let trial = 0; trial < sims; trial++) {
+    const wins = teams.map(r => Number(r.wins || 0));
+    const losses = teams.map(r => Number(r.losses || 0));
+    const ties = teams.map(r => Number(r.ties || 0));
+    const pf = teams.map(r => Number(r.pointsFor || 0));
+    schedule.forEach(pairs => pairs.forEach(([a,b]) => {
+      const sa = Math.max(0, means[a] + std * stOddsNormal_(random));
+      const sb = Math.max(0, means[b] + std * stOddsNormal_(random));
+      pf[a] += sa; pf[b] += sb;
+      if (Math.abs(sa - sb) < 0.005) { ties[a]++; ties[b]++; }
+      else if (sa > sb) { wins[a]++; losses[b]++; }
+      else { wins[b]++; losses[a]++; }
+    }));
+    const rank = (a,b) => {
+      const ga = wins[a]+losses[a]+ties[a], gb = wins[b]+losses[b]+ties[b];
+      const pa = ga ? (wins[a]+ties[a]/2)/ga : 0;
+      const pb = gb ? (wins[b]+ties[b]/2)/gb : 0;
+      return pb-pa || pf[b]-pf[a] || ids[a]-ids[b];
+    };
+    // Follow the same projected field rule as the existing bracket: two division
+    // winners, followed by the best remaining teams. This is not ESPN's official odds.
+    const divisions = [...new Set(teams.map(r => Number(r.divisionId)))];
+    if (divisions.length !== 2) throw new Error('Expected two Zenni League divisions.');
+    const leaders = divisions.map(div => teams.map((r,i) => Number(r.divisionId) === div ? i : -1)
+      .filter(i => i >= 0).sort(rank)[0]).sort(rank);
+    const selected = leaders.concat(teams.map((r,i)=>i).filter(i => !leaders.includes(i)).sort(rank))
+      .slice(0, 8);
+    selected.forEach(i => counts[i]++);
+  }
+  return { through: model.through, remaining, trials: sims,
+    percentages: Object.fromEntries(teams.map((r,i) => [Number(r.teamId), counts[i] / sims * 100])) };
+}
+
+function stOddsHtml_(model) {
+  const result = stOddsState_.key === stOddsSignature_(model) ? stOddsState_.result : null;
+  const status = stOddsState_.loading ? 'Reading remaining ESPN matchups and simulating playoff outcomes…'
+    : stOddsState_.error ? escapeHtml(stOddsState_.error)
+    : 'Playoff probability estimates load when you open Standings.';
+  const header = `<div class="st-odds-heading"><div><span class="st-kicker">The playoff race</span><h3>Chance to make the playoffs</h3><p>8 of 12 teams qualify · NFL weeks 1–14</p></div><span class="st-odds-method">${result ? (result.remaining ? result.trials.toLocaleString() + ' simulations' : 'Regular season complete') : 'Estimated odds'}</span></div>`;
+  if (!result) return `${header}<div class="st-odds-status" role="status">${status}${stOddsState_.error ? ' <button type="button" data-st-odds-retry="1">Retry</button>' : ''}</div><p class="st-odds-disclaimer">Independent model, not official ESPN playoff odds. No percentages are shown without the remaining schedule.</p>`;
+  const sorted = model.rows.slice().sort((a,b) => result.percentages[b.teamId] - result.percentages[a.teamId] || stCompare_(a,b));
+  const items = sorted.map(row => {
+    const raw = result.percentages[row.teamId];
+    const pct = result.remaining ? (raw === 0 ? '<0.1%' : raw === 100 ? '>99.9%' : raw.toFixed(1) + '%') : raw.toFixed(0) + '%';
+    const cls = raw >= 75 ? 'is-high' : raw >= 40 ? 'is-mid' : 'is-low';
+    return `<button type="button" class="st-odds-row ${cls}" data-st-odds-team="${Number(row.teamId)}" aria-label="View ${escapeAttr(row.teamName)}, ${pct} estimated chance of making playoffs"><span class="st-odds-logo">${awardsLogoHtml_(row.team, 'st-logo')}</span><span class="st-odds-info"><strong>${escapeHtml(row.teamName)}</strong><small>${stRecord_(row)} · ${row.seed ? 'Projected seed '+row.seed : 'Outside projected field'}</small><span class="st-odds-track" aria-hidden="true"><i style="width:${raw.toFixed(2)}%"></i></span></span><span class="st-odds-value">${pct}</span></button>`;
+  }).join('');
+  return `${header}<div class="st-odds-list">${items}</div><p class="st-odds-disclaimer">${result.remaining ? `Estimates through Week ${model.through}, using ESPN's remaining matchups, current W-L records and points per game. 30-point weekly scoring variation; division leaders are seeded first. Does not account for injuries, trades, live partial-game scores or ESPN-specific tiebreakers.` : 'Final regular-season qualification, based on the projected field and available standings.'} Not official ESPN probabilities.</p>`;
+}
+
+function stOddsRender_(model) {
+  const box = document.getElementById('stOdds');
+  if (!box || !model) return;
+  box.innerHTML = stOddsHtml_(model);
+}
+
+async function stOddsEnsure_(force = false) {
+  const model = state.standingsModel;
+  if (!model || model.rows.length !== 12 || model.playoffTeams !== 8) return;
+  const key = stOddsSignature_(model);
+  if (!key || (stOddsState_.loading && stOddsState_.key === key && !force) || (!force && stOddsState_.key === key && stOddsState_.result)) return;
+  const token = ++stOddsState_.token;
+  stOddsState_.loading = true; stOddsState_.error = ''; stOddsState_.result = null; stOddsState_.key = key;
+  stOddsRender_(model);
+  try {
+    const last = Number(state.league && state.league.regularSeasonWeeks || 14);
+    const weeks = [];
+    const pending = [];
+    for (let w = model.through + 1; w <= last; w++) pending.push(w);
+    // Limit concurrent Apps Script calls so this doesn't slow the live scoreboard.
+    let cursor = 0;
+    async function worker() {
+      while (cursor < pending.length) {
+        const week = pending[cursor++];
+        const cached = state.weekCache.get(week);
+        const data = cached && cached.length === 6 ? {matchups:cached} : await api_('matchups', {week});
+        weeks[week - model.through - 1] = {matchups: Array.isArray(data.matchups) ? data.matchups : []};
+      }
+    }
+    await Promise.all([worker(), worker()]);
+    if (token !== stOddsState_.token) return;
+    const result = stOddsSimulate_(model, weeks);
+    stOddsState_.result = result;
+    stOddsState_.loading = false;
+    stOddsRender_(state.standingsModel || model);
+  } catch (error) {
+    if (token !== stOddsState_.token) return;
+    stOddsState_.loading = false;
+    stOddsState_.error = (error && error.message) || 'Could not load the remaining ESPN schedule.';
+    stOddsRender_(state.standingsModel || model);
+  }
+}
+
 /* ---------- snapshots: what changed since the last render / the last visit ---------- */
 function stSnapshot_(model) {
   const rows = {};
@@ -7914,8 +8077,10 @@ function renderStandingsTimeline_(model) {
   if (!model) return;
   const league = state.league || {};
   const regular = Math.max(1, Number(league.regularSeasonWeeks || 14));
-  const hasPlayoffs = Number(league.playoffTeams || 0) === 10;
-  const finalWeek = regular + (hasPlayoffs ? 4 : 0);
+  const playoffCount = Number(league.playoffTeams || 0);
+  const playoffRounds = playoffCount === 8 ? 3 : playoffCount === 10 ? 4 : 0;
+  const hasPlayoffs = playoffRounds > 0;
+  const finalWeek = regular + playoffRounds;
   const through = model.through, upcoming = through + 1;
   const head = through < 1 ? 'Preseason' : through >= finalWeek ? 'Season complete' : `Through week ${through}`;
   let kick = '';
@@ -7949,8 +8114,8 @@ function renderStandingsLegend_(model) {
     ? `Seeds are ESPN's projection and move until week ${regular}.`
     : `Projected seeds from record, then points. They move until week ${regular}.`;
   box.innerHTML = `
-    <span><span class="st-seedchip is-bye">1</span><span class="st-long">Round 1 bye, seeds 1 to ${byes}</span><span class="st-short">Bye, 1 to ${byes}</span></span>
-    <span><span class="st-seedchip is-play">${byes + 2}</span><span class="st-long">Plays in week ${regular + 1}, seeds ${byes + 1} to ${model.playoffTeams}</span><span class="st-short">Week ${regular + 1}, ${byes + 1} to ${model.playoffTeams}</span></span>
+    ${byes ? `<span><span class="st-seedchip is-bye">1</span><span class="st-long">Round 1 bye, seeds 1 to ${byes}</span><span class="st-short">Bye, 1 to ${byes}</span></span>` : ''}
+    <span><span class="st-seedchip is-play">${byes ? byes + 1 : 1}</span><span class="st-long">Plays in week ${regular + 1}, seeds ${byes + 1} to ${model.playoffTeams}</span><span class="st-short">Week ${regular + 1}, ${byes + 1} to ${model.playoffTeams}</span></span>
     <span><span class="st-seedchip is-out">–</span><span class="st-long">Outside the field</span><span class="st-short">Out</span></span>
     <span class="st-note">${note}</span>`;
 }
@@ -8064,7 +8229,9 @@ function renderStandings() {
   grid.innerHTML = ST_CONF.map(conf => stConfCardHtml_(model, conf)).join('');
   renderStandingsTimeline_(model);
   renderStandingsLegend_(model);
+  stOddsRender_(model);
   renderStandingsBracket_(model);
+  if (visible) stOddsEnsure_();
   state.standingsPrev = cur;
 
   if (focusedTeam) { const again = grid.querySelector(`[data-open-team="${focusedTeam}"]`); if (again) again.focus({ preventScroll: true }); }
@@ -8101,94 +8268,154 @@ function onStandingsShown_() {
   stScheduleFlashClear_();
   stSaveBaseline_();
   if ((state.stSection || 'standings') === 'bracket') onBracketShown_();
+  stOddsEnsure_();
 }
 
-/* ---------- bracket ---------- */
-// Fixed 10-team bracket (as drawn by ESPN): round 1 = 7v10 and 8v9, seeds 1-6 have byes.
-const ST_R1 = [[1], [8, 9], [5], [4], [6], [3], [7, 10], [2]];
+/* ---------- bracket: 8-team championship + both consolation ladders ---------- */
+// The championship has three rounds (weeks 15-17) and no byes.
+// Pairings are projected from the current ESPN seeds; future-round opponents are
+// deliberately labelled as winners/losers until ESPN's results are available.
+const ST_R1 = [[1, 8], [4, 5], [3, 6], [2, 7]];
 
-function stBracketOk_(model) { return model.playoffTeams === 10 && model.seedSource !== 'none' && model.bySeed.size === 10; }
+function stBracketOk_(model) {
+  return !!model && model.playoffTeams === 8 && model.seedSource !== 'none' &&
+    Array.from({ length: 8 }, (_, i) => i + 1).every(seed => model.bySeed.has(seed));
+}
 
 function stPathSteps_(model, row) {
-  if (!row || row.seed == null) return null;
-  const seed = row.seed;
-  const nm = s => escapeHtml(model.bySeed.get(s).teamName);
-  const idx = ST_R1.findIndex(group => group.includes(seed));
-  const group = ST_R1[idx];
-  const describe = gi => { const g = ST_R1[gi]; return g.length === 1 ? nm(g[0]) : `the winner of ${g[0]} vs ${g[1]} (${g.map(nm).join(' or ')})`; };
-  const opp = group.find(s => s !== seed);
-  const o = (idx >> 1) ^ 1, third = [o * 2, o * 2 + 1].flatMap(i => ST_R1[i]);
-  const oh = (idx >> 2) ^ 1, fourth = [0, 1, 2, 3].flatMap(k => ST_R1[oh * 4 + k]);
-  const regular = Number(state.league && state.league.regularSeasonWeeks || 14);
+  if (!row || row.seed == null || row.seed > 8) return null;
+  const idx = ST_R1.findIndex(pair => pair.includes(row.seed));
+  if (idx < 0) return null;
+  const pair = ST_R1[idx];
+  const other = pair.find(seed => seed !== row.seed);
+  const oppositePair = ST_R1[idx ^ 1];
+  const oppositeHalf = ST_R1.slice(idx < 2 ? 2 : 0, idx < 2 ? 4 : 2).flat();
+  const name = seed => escapeHtml(model.bySeed.get(seed).teamName);
+  const week = Number(state.league && state.league.regularSeasonWeeks || 14);
   return [
-    { wk: `Week ${regular + 1}`, txt: group.length === 1 ? 'Bye' : `vs ${nm(opp)} (seed ${opp})` },
-    { wk: `Week ${regular + 2}`, txt: `vs ${describe(idx ^ 1)}` },
-    { wk: `Week ${regular + 3}`, txt: `Could face ${third.map(nm).join(', ')}` },
-    { wk: `Week ${regular + 4}`, txt: `Championship vs the winner of the ${oh ? 'bottom' : 'top'} half (${fourth.length} teams left there)` }
+    { wk: `Week ${week + 1}`, txt: `Quarterfinal vs ${name(other)} (seed ${other})` },
+    { wk: `Week ${week + 2}`, txt: `If you advance, semifinal vs winner of ${oppositePair.map(name).join(' / ')}` },
+    { wk: `Week ${week + 3}`, txt: `If you advance, championship vs winner from ${oppositeHalf.map(name).join(', ')}` }
   ];
 }
 
 function stPathBarHtml_(model) {
   const row = model.rows.find(r => Number(r.teamId) === Number(state.stPickId));
   const steps = row && stPathSteps_(model, row);
-  if (!steps) return '<div class="st-hint">Tap a team to trace its route to the championship.</div>';
-  return `<div class="st-pathbar" aria-live="polite"><div class="st-ph"><b>${escapeHtml(row.teamName)}</b><span>seed ${row.seed}, path to the title</span><button type="button" class="st-clear" data-st-clear="1">Clear</button></div><ol>${steps.map(s => `<li><span>${s.wk}</span>${s.txt}</li>`).join('')}</ol></div>`;
+  if (!steps) return '<div class="st-hint">Tap a playoff team to trace its projected path to the championship.</div>';
+  return `<div class="st-pathbar" aria-live="polite"><div class="st-ph"><b>${escapeHtml(row.teamName)}</b><span>seed ${row.seed}, projected path to the title</span><button type="button" class="st-clear" data-st-clear="1">Clear</button></div><ol>${steps.map(s => `<li><span>${s.wk}</span>${s.txt}</li>`).join('')}</ol></div>`;
 }
 
 function stBkTeam_(model, seed) {
   const row = model.bySeed.get(seed);
+  if (!row) return stBkGhost_('Seed ' + seed + ' TBD');
   return `<button type="button" class="st-bk-t" data-st-pick="${row.teamId}" aria-label="Trace ${escapeAttr(row.teamName)}'s path">${stSeedChipHtml_(model, row, 'st-sm')}${awardsLogoHtml_(row.team, 'st-logo-bk')}<span class="st-bk-nm"><strong>${escapeHtml(row.teamName)}</strong><small>${stRecord_(row)}</small></span></button>`;
 }
-function stBkGhost_(text) { return `<div class="st-bk-t is-ghost"><span class="st-seedchip is-ghost st-sm"></span><span class="wa-logo st-logo-bk is-ghost"></span><span class="st-bk-nm"><strong>${escapeHtml(text)}</strong></span></div>`; }
+function stBkGhost_(text) {
+  return `<div class="st-bk-t is-ghost"><span class="st-seedchip is-ghost st-sm"></span><span class="wa-logo st-logo-bk is-ghost"></span><span class="st-bk-nm"><strong>${escapeHtml(text)}</strong></span></div>`;
+}
+
+function stBracketColumn_(name, week, body) {
+  return `<div class="st-rd"><h4><b>${name}</b><span>NFL Week ${week}</span></h4><div class="st-slots">${body}</div></div>`;
+}
+function stMatchCard_(id, body, row, span, from, extra) {
+  return `<div class="st-mc ${extra || ''}" data-id="${id}" ${from ? `data-from="${from}"` : ''} style="grid-row:${row} / span ${span}">${body}</div>`;
+}
+function stPhoneCard_(body, note, extra) {
+  return `<div class="st-pm ${extra || ''}">${body}${note ? `<div class="st-pm-note">${note}</div>` : ''}</div>`;
+}
+function stConsolationTeam_(row, seed) {
+  if (!row) return stBkGhost_('Seed ' + seed + ' TBD');
+  return `<button type="button" class="st-bk-t" data-st-open-team="${row.teamId}" aria-label="Open ${escapeAttr(row.teamName)} team profile"><span class="st-seedchip is-out st-sm">${seed}</span>${awardsLogoHtml_(row.team, 'st-logo-bk')}<span class="st-bk-nm"><strong>${escapeHtml(row.teamName)}</strong><small>${stRecord_(row)}</small></span></button>`;
+}
+
+function stConsolationLadders_(model, week) {
+  const outside = model.rows.filter(row => row.seed == null).sort(stCompare_);
+  // ESPN's ranking may include seeds 9..12 even though they are outside the playoff field.
+  const rank = outside.slice(0, 4);
+  const label = (i, seed) => stConsolationTeam_(rank[i], seed);
+  const ghost = stBkGhost_;
+  // Winner's consolation: the four championship quarterfinal LOSERS enter in week 16.
+  // No team is assigned before the corresponding championship quarterfinal is final.
+  const wc1 = [
+    stMatchCard_('wc0', ghost('Loser: 1 / 8') + ghost('Loser: 4 / 5'), 1, 2),
+    stMatchCard_('wc1', ghost('Loser: 3 / 6') + ghost('Loser: 2 / 7'), 3, 2)
+  ].join('');
+  const wc2 = [
+    stMatchCard_('wc2', ghost('Winner of WC1') + ghost('Winner of WC2'), 1, 2, 'wc0,wc1'),
+    stMatchCard_('wc3', ghost('Loser of WC1') + ghost('Loser of WC2'), 3, 2, 'wc0,wc1')
+  ].join('');
+  const cc1 = [
+    stMatchCard_('cc0', label(1, 10) + label(0, 9), 1, 2),
+    stMatchCard_('cc1', label(3, 12) + label(2, 11), 3, 2)
+  ].join('');
+  const cc2 = [
+    stMatchCard_('cc2', ghost('Winner of C1') + ghost('Winner of C2'), 1, 2, 'cc0,cc1'),
+    stMatchCard_('cc3', ghost('Loser of C1') + ghost('Loser of C2'), 3, 2, 'cc0,cc1')
+  ].join('');
+  const cc3 = [
+    stMatchCard_('cc4', ghost('Winner of C3') + ghost('Winner of C4'), 1, 2, 'cc2,cc3'),
+    stMatchCard_('cc5', ghost('Loser of C3') + ghost('Loser of C4'), 3, 2, 'cc2,cc3')
+  ].join('');
+  // The user's ESPN screenshot has round 2 / 3 placeholders. This is a projected
+  // ladder, not a claim that ESPN has already scheduled or finalized those games.
+  const section = (title, subtitle, cols, phone) => `
+    <section class="st-cons-section" aria-label="${escapeAttr(title)}">
+      <div class="st-bk-title"><h3>${title}</h3><span>${subtitle}</span></div>
+      <div class="st-bk st-cons-pc">${cols}</div>
+      <div class="st-cons-phone">${phone}</div>
+    </section>`;
+  const winner = section(
+    "Winner's Consolation Ladder",
+    `Projected · Quarterfinal losers play in NFL weeks ${week + 1}–${week + 2}`,
+    stBracketColumn_('Round 2', week + 1, wc1) + stBracketColumn_('Round 3', week + 2, wc2),
+    `<h4>Week ${week + 1}</h4>${stPhoneCard_(ghost('Loser: 1 / 8') + ghost('Loser: 4 / 5'))}${stPhoneCard_(ghost('Loser: 3 / 6') + ghost('Loser: 2 / 7'))}<h4>Week ${week + 2}</h4>${stPhoneCard_(ghost('5th-place finalists'))}${stPhoneCard_(ghost('7th-place finalists'))}`
+  );
+  const consolation = section(
+    'Consolation Ladder',
+    `Projected · Seeds 9–12 begin in NFL week ${week}`,
+    stBracketColumn_('Round 1', week, cc1) + stBracketColumn_('Round 2', week + 1, cc2) + stBracketColumn_('Round 3', week + 2, cc3),
+    `<h4>Week ${week}</h4>${stPhoneCard_(label(1, 10) + label(0, 9))}${stPhoneCard_(label(3, 12) + label(2, 11))}<h4>Week ${week + 1}</h4>${stPhoneCard_(ghost('Winners: 9th-place game'))}${stPhoneCard_(ghost('Losers: 11th-place game'))}<h4>Week ${week + 2}</h4>${stPhoneCard_(ghost('Winner of C3') + ghost('Winner of C4')) + stPhoneCard_(ghost('Loser of C3') + ghost('Loser of C4'))}`
+  );
+  return `<div class="st-cons-wrap">${winner}${consolation}</div>`;
+}
 
 function renderStandingsBracket_(model) {
   const box = document.getElementById('stBracket');
   if (!box) return;
   model = model || state.standingsModel;
   if (!stBracketOk_(model)) {
-    box.innerHTML = '<div class="st-empty"><strong>The bracket appears after week 1.</strong><span>Once teams have played, ESPN\'s playoff seeds fill in here.</span></div>';
+    const reason = !model || model.through < 1
+      ? 'Projected seeds appear after Week 1.'
+      : `The bracket is waiting for eight valid playoff seeds (ESPN reports ${model.playoffTeams} playoff teams).`;
+    box.innerHTML = `<div class="st-empty"><strong>Playoff picture unavailable</strong><span>${escapeHtml(reason)}</span></div>`;
     return;
   }
-  const regular = Number(state.league && state.league.regularSeasonWeeks || 14), w1 = regular + 1, finalWeek = regular + 4;
-  const champ = model.rows.find(r => r.defendingChampion);
-  const t = s => stBkTeam_(model, s);
-  const bye = '<div class="st-bk-bye">Bye, advances to week ' + (w1 + 1) + '</div>';
-
-  const r1 = ST_R1.map((g, i) => `<div class="st-mc" data-id="a${i}" style="grid-row:${i + 1}">${g.length === 1 ? t(g[0]) + bye : t(g[0]) + t(g[1])}</div>`).join('');
-  const r2def = [[['t', 1], ['g', 'Winner of seed 8 / 9']], [['t', 5], ['t', 4]], [['t', 6], ['t', 3]], [['g', 'Winner of seed 7 / 10'], ['t', 2]]];
-  const cell = x => x[0] === 't' ? t(x[1]) : stBkGhost_(x[1]);
-  const r2 = r2def.map((p, i) => `<div class="st-mc" data-id="b${i}" data-from="a${2 * i},a${2 * i + 1}" style="grid-row:${2 * i + 1} / span 2">${cell(p[0]) + cell(p[1])}</div>`).join('');
-  const r3def = [['Winner of 1 vs 8 / 9', 'Winner of 4 vs 5'], ['Winner of 6 vs 3', 'Winner of 2 vs 7 / 10']];
-  const r3 = r3def.map((p, i) => `<div class="st-mc" data-id="c${i}" data-from="b${2 * i},b${2 * i + 1}" style="grid-row:${4 * i + 1} / span 4">${stBkGhost_(p[0]) + stBkGhost_(p[1])}</div>`).join('');
-  const r4 = `<div class="st-mc is-final" data-id="d0" data-from="c0,c1" style="grid-row:1 / span 8"><div class="st-final-h">${awardsIcon_('trophy')}<span>Zenni League champion</span></div>${stBkGhost_('Winner of the top half')}${stBkGhost_('Winner of the bottom half')}</div>`;
-  const col = (name, week, body) => `<div class="st-rd"><h4><b>${name}</b><span>Week ${week}</span></h4><div class="st-slots">${body}</div></div>`;
-
-  // Phone: one round at a time.
-  const R = state.stRound || 1;
-  const pills = [[1, 'Round 1', w1], [2, 'Round 2', w1 + 1], [3, 'Round 3', w1 + 2], [4, 'Final', finalWeek]]
+  const regular = Number(state.league && state.league.regularSeasonWeeks || 14);
+  const w1 = regular + 1, finalWeek = regular + 3;
+  const champ = model.rows.find(row => row.defendingChampion);
+  const t = seed => stBkTeam_(model, seed), ghost = stBkGhost_;
+  const first = ST_R1.map((pair, i) => stMatchCard_('a' + i, t(pair[0]) + t(pair[1]), i * 2 + 1, 2)).join('');
+  const semiDefs = [['Winner of 1 / 8', 'Winner of 4 / 5'], ['Winner of 3 / 6', 'Winner of 2 / 7']];
+  const semis = semiDefs.map((pair, i) => stMatchCard_('b' + i, ghost(pair[0]) + ghost(pair[1]), i * 4 + 1, 4, `a${i * 2},a${i * 2 + 1}`)).join('');
+  const final = stMatchCard_('c0', `<div class="st-final-h"><span aria-hidden="true">♛</span><span>Zenni League championship belt</span></div>${ghost('Winner of semifinal 1')}${ghost('Winner of semifinal 2')}`, 1, 8, 'b0,b1', 'is-final');
+  const R = Math.min(3, Math.max(1, Number(state.stRound || 1)));
+  state.stRound = R;
+  const pills = [[1, 'Quarterfinals', w1], [2, 'Semifinals', w1 + 1], [3, 'Final', finalWeek]]
     .map(p => `<button type="button" class="st-pill ${R === p[0] ? 'is-active' : ''}" data-st-round="${p[0]}" aria-pressed="${R === p[0]}">${p[1]}<small>Week ${p[2]}</small></button>`).join('');
-  const card = (inner, note) => `<div class="st-pm">${inner}${note ? `<div class="st-pm-note">${note}</div>` : ''}</div>`;
-  let phone = '';
-  if (R === 1) {
-    phone = [[8, 9, `Winner plays seed 1 in week ${w1 + 1}`], [7, 10, `Winner plays seed 2 in week ${w1 + 1}`]].map(g => card(t(g[0]) + t(g[1]), g[2])).join('') +
-      [[1, 'the 8 / 9 winner'], [5, 'seed 4'], [4, 'seed 5'], [6, 'seed 3'], [3, 'seed 6'], [2, 'the 7 / 10 winner']].map(b => card(t(b[0]) + `<div class="st-bk-bye">Bye, then plays ${b[1]} in week ${w1 + 1}</div>`)).join('');
-  } else if (R === 2) {
-    phone = r2def.map(p => card(cell(p[0]) + cell(p[1]))).join('');
-  } else if (R === 3) {
-    phone = r3def.map(p => card(stBkGhost_(p[0]) + stBkGhost_(p[1]))).join('');
-  } else {
-    phone = `<div class="st-pm is-final"><div class="st-final-h">${awardsIcon_('trophy')}<span>Zenni League champion</span></div>${stBkGhost_('Winner of the top half')}${stBkGhost_('Winner of the bottom half')}</div>`;
-  }
-
+  const phone = R === 1 ? ST_R1.map(pair => stPhoneCard_(t(pair[0]) + t(pair[1]))).join('')
+    : R === 2 ? semiDefs.map(pair => stPhoneCard_(ghost(pair[0]) + ghost(pair[1]))).join('')
+    : stPhoneCard_(`<div class="st-final-h"><span aria-hidden="true">♛</span><span>Championship belt</span></div>${ghost('Winner of semifinal 1')}${ghost('Winner of semifinal 2')}`, '', 'is-final');
   box.innerHTML = `
     <div class="st-bk-wrap">
-      <div class="st-bk-title"><h3>Projected playoff bracket</h3><span>If the season ended today${model.seedSource === 'espn' ? ", using ESPN's seeds" : ''}. Seeds 1 to ${stByes_(10)} get a round 1 bye.</span></div>
+      <div class="st-bk-title"><h3>Projected 8-team playoff bracket</h3><span>Seeds 1–8 · no first-round byes · NFL weeks ${w1}–${finalWeek}. ${model.seedSource === 'espn' ? 'ESPN playoff seeds.' : 'Seeds derived from current standings.'}</span></div>
       <div id="stPathBar">${stPathBarHtml_(model)}</div>
-      <div class="st-bk st-bk-pc" id="stBk"><svg class="st-conn" id="stConn" aria-hidden="true"></svg>${col('Round 1', w1, r1)}${col('Round 2', w1 + 1, r2)}${col('Round 3', w1 + 2, r3)}${col('Championship', finalWeek, r4)}</div>
+      <div class="st-bk st-bk-pc is-eight" id="stBk"><svg class="st-conn" id="stConn" aria-hidden="true"></svg>${stBracketColumn_('Quarterfinals', w1, first)}${stBracketColumn_('Semifinals', w1 + 1, semis)}${stBracketColumn_('Championship', finalWeek, final)}</div>
       <div class="st-bk-phone"><div class="st-pills">${pills}</div>${phone}</div>
-      ${champ ? `<div class="st-champnote">${stCrownSvg_()} Defending champion: ${escapeHtml(champ.teamName)}${champ.seed ? `, currently the ${champ.seed} seed` : ', currently outside the playoff field'}.</div>` : ''}
-    </div>`;
-  if (stIsVisible_() && (state.stSection === 'bracket')) requestAnimationFrame(() => requestAnimationFrame(() => { stDrawConnectors_(); stApplyTrace_(false); }));
+      ${champ ? `<div class="st-champnote">${stCrownSvg_()} Defending champion: ${escapeHtml(champ.teamName)}${champ.seed ? `, currently seed ${champ.seed}` : ', currently outside the playoff field'}.</div>` : ''}
+    </div>
+    ${stConsolationLadders_(model, w1)}`;
+  if (stIsVisible_() && state.stSection === 'bracket') requestAnimationFrame(() => requestAnimationFrame(() => { stDrawConnectors_(); stApplyTrace_(false); }));
 }
 
 function stDrawConnectors_() {
@@ -8215,16 +8442,17 @@ function stApplyTrace_(animate) {
   const model = state.standingsModel;
   bk.querySelectorAll('.st-mc.is-on').forEach(el => el.classList.remove('is-on'));
   document.querySelectorAll('#stBracket .st-bk-t.is-picked').forEach(el => el.classList.remove('is-picked'));
-  svg.querySelectorAll('path.st-hl').forEach(p => p.remove());
+  svg.querySelectorAll('path.st-hl').forEach(path => path.remove());
   const row = model && model.rows.find(r => Number(r.teamId) === Number(state.stPickId));
-  if (!row || row.seed == null) { bk.classList.remove('is-tracing'); return; }
+  if (!row || row.seed == null || row.seed > 8) { bk.classList.remove('is-tracing'); return; }
+  const idx = ST_R1.findIndex(pair => pair.includes(row.seed));
+  if (idx < 0) { bk.classList.remove('is-tracing'); return; }
   bk.classList.add('is-tracing');
-  const idx = ST_R1.findIndex(g => g.includes(row.seed));
-  const ids = ['a' + idx, 'b' + (idx >> 1), 'c' + (idx >> 2), 'd0'];
+  const ids = ['a' + idx, 'b' + Math.floor(idx / 2), 'c0'];
   ids.forEach(id => { const el = bk.querySelector(`[data-id="${id}"]`); if (el) el.classList.add('is-on'); });
   document.querySelectorAll(`#stBracket .st-bk-t[data-st-pick="${row.teamId}"]`).forEach(el => el.classList.add('is-picked'));
-  for (let i = 0; i < 3; i++) {
-    const base = svg.querySelector(`path[data-f="${ids[i]}"][data-t="${ids[i + 1]}"]`);
+  for (let i = 0; i < ids.length - 1; i++) {
+    const base = Array.from(svg.querySelectorAll('path.st-base')).find(path => path.dataset.f === ids[i] && path.dataset.t === ids[i + 1]);
     if (!base) continue;
     const hl = base.cloneNode(); hl.setAttribute('class', 'st-hl'); svg.appendChild(hl);
     if (animate && !recapPrefersReducedMotion_()) {
@@ -8280,8 +8508,16 @@ function bindStandings_() {
     const row = event.target.closest('.st-row');
     if (row) openTeamModal(Number(row.dataset.teamId));
   });
+  const odds = document.getElementById('stOdds');
+  if (odds) odds.addEventListener('click', event => {
+    if (event.target.closest('[data-st-odds-retry]')) { stOddsEnsure_(true); return; }
+    const row = event.target.closest('[data-st-odds-team]');
+    if (row) openTeamModal(Number(row.dataset.stOddsTeam));
+  });
   const bracket = document.getElementById('stBracket');
   if (bracket) bracket.addEventListener('click', event => {
+    const consolationTeam = event.target.closest('[data-st-open-team]');
+    if (consolationTeam) { openTeamModal(Number(consolationTeam.dataset.stOpenTeam)); return; }
     const pick = event.target.closest('[data-st-pick]');
     if (pick) { const id = Number(pick.dataset.stPick); state.stPickId = Number(state.stPickId) === id ? null : id; stRefreshPathBar_(); stApplyTrace_(true); return; }
     if (event.target.closest('[data-st-clear]')) { state.stPickId = null; stRefreshPathBar_(); stApplyTrace_(false); return; }
@@ -8586,4 +8822,4 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value);
-}
+} 
