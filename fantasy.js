@@ -1,5 +1,5 @@
 const API_URL =
-  'https://script.google.com/macros/s/AKfycbzKMV9Vy3fq2UQlT8Z5Ll67gsEieLE1EhrFQ13hnENcNzp2FOX-2lBv402tSvivKeriOg/exec';
+  'https://script.google.com/a/macros/zennioptical.com/s/AKfycbzKMV9Vy3fq2UQlT8Z5Ll67gsEieLE1EhrFQ13hnENcNzp2FOX-2lBv402tSvivKeriOg/exec';
 
 const FantasyPerf = (() => {
   const navStart = performance.timeOrigin || Date.now();
@@ -7891,23 +7891,82 @@ function stOddsSimulate_(model, weeks) {
     percentages: Object.fromEntries(teams.map((r,i) => [Number(r.teamId), counts[i] / sims * 100])) };
 }
 
+function stSplitRecord_(row, name) {
+  // Splits are optional: the current Zenni standings API may not expose them.
+  // Never substitute overall record or derive a fictitious split.
+  const direct = row[name + 'Record'];
+  if (typeof direct === 'string' && /^\d+-\d+(?:-\d+)?$/.test(direct.trim())) return direct.trim();
+  const object = direct && typeof direct === 'object' ? direct : null;
+  const record = object || (row.records && row.records[name]) || null;
+  if (record && typeof record === 'object' && Number.isFinite(Number(record.wins)) && Number.isFinite(Number(record.losses))) {
+    return Number(record.wins) + '-' + Number(record.losses) + (Number(record.ties || 0) ? '-' + Number(record.ties) : '');
+  }
+  if (Number.isFinite(Number(row[name + 'Wins'])) && row[name + 'Wins'] != null &&
+      Number.isFinite(Number(row[name + 'Losses'])) && row[name + 'Losses'] != null) {
+    return Number(row[name + 'Wins']) + '-' + Number(row[name + 'Losses']) +
+      (Number(row[name + 'Ties'] || 0) ? '-' + Number(row[name + 'Ties']) : '');
+  }
+  return '—';
+}
+
 function stOddsHtml_(model) {
   const result = stOddsState_.key === stOddsSignature_(model) ? stOddsState_.result : null;
   const status = stOddsState_.loading ? 'Reading remaining ESPN matchups and simulating playoff outcomes…'
     : stOddsState_.error ? escapeHtml(stOddsState_.error)
     : 'Playoff probability estimates load when you open Standings.';
-  const header = `<div class="st-odds-heading"><div><span class="st-kicker">The playoff race</span><h3>Chance to make the playoffs</h3><p>8 of 12 teams qualify · NFL weeks 1–14</p></div><span class="st-odds-method">${result ? (result.remaining ? result.trials.toLocaleString() + ' simulations' : 'Regular season complete') : 'Estimated odds'}</span></div>`;
-  if (!result) return `${header}<div class="st-odds-status" role="status">${status}${stOddsState_.error ? ' <button type="button" data-st-odds-retry="1">Retry</button>' : ''}</div><p class="st-odds-disclaimer">Independent model, not official ESPN playoff odds. No percentages are shown without the remaining schedule.</p>`;
-  const sorted = model.rows.slice().sort((a,b) => result.percentages[b.teamId] - result.percentages[a.teamId] || stCompare_(a,b));
-  const items = sorted.map(row => {
-    const raw = result.percentages[row.teamId];
-    const pct = result.remaining ? (raw === 0 ? '<0.1%' : raw === 100 ? '>99.9%' : raw.toFixed(1) + '%') : raw.toFixed(0) + '%';
-    const cls = raw >= 75 ? 'is-high' : raw >= 40 ? 'is-mid' : 'is-low';
-    return `<button type="button" class="st-odds-row ${cls}" data-st-odds-team="${Number(row.teamId)}" aria-label="View ${escapeAttr(row.teamName)}, ${pct} estimated chance of making playoffs"><span class="st-odds-logo">${awardsLogoHtml_(row.team, 'st-logo')}</span><span class="st-odds-info"><strong>${escapeHtml(row.teamName)}</strong><small>${stRecord_(row)} · ${row.seed ? 'Projected seed '+row.seed : 'Outside projected field'}</small><span class="st-odds-track" aria-hidden="true"><i style="width:${raw.toFixed(2)}%"></i></span></span><span class="st-odds-value">${pct}</span></button>`;
+  const total = model.rows.length;
+  const sorted = model.rows.slice().sort((a, b) => {
+    if (a.seed != null && b.seed != null) return Number(a.seed) - Number(b.seed);
+    if (a.seed != null) return -1;
+    if (b.seed != null) return 1;
+    return stCompare_(a, b);
+  });
+  const last = Number(state.league && state.league.regularSeasonWeeks || 14);
+  const header = `<div class="st-odds-heading st-unified-heading"><div><span class="st-kicker">The playoff race</span><h3>Season Stats &amp; Playoff Chances</h3><p>ESPN season results and independent playoff estimates in one table</p></div><span class="st-odds-method">Top ${model.playoffTeams || 8} of ${total || 12} qualify</span></div>`;
+  if (!total) return `${header}<div class="st-odds-status" role="status">Waiting for ESPN standings. No season results are available yet.</div>`;
+  const splitsMissing = sorted.some(row => ['division', 'home', 'away'].some(name => stSplitRecord_(row, name) === '—'));
+  const myTeam = getMyTeamId_();
+  const rows = sorted.map((row, index) => {
+    const id = Number(row.teamId);
+    const raw = result && result.percentages ? Number(result.percentages[id]) : null;
+    const valid = raw != null && Number.isFinite(raw);
+    const pct = !valid ? '—' : result.remaining
+      ? (raw === 0 ? '<0.1%' : raw === 100 ? '>99.9%' : raw.toFixed(1) + '%') : raw.toFixed(0) + '%';
+    const cls = !valid ? 'is-pending' : raw >= 75 ? 'is-high' : raw >= 40 ? 'is-mid' : 'is-low';
+    const rank = row.seed != null ? Number(row.seed) : index + 1;
+    const seedType = model.seedSource === 'espn' ? 'ESPN seed' : 'Projected rank';
+    const team = row.team;
+    const espnName = String(row.teamName || (team && team.name) || ('Team ' + id)).trim();
+    // Historic identity is explicitly labeled; never claim it is ESPN's current name.
+    const historicalAlias = id === 12 && /^Team\s*12$/i.test(espnName)
+      ? "Jeremy's Scary Team" : '';
+    const name = escapeHtml(historicalAlias || espnName);
+    const teamSubtext = historicalAlias
+      ? 'Historical name · ESPN currently: ' + espnName
+      : (team ? ownerText(team) : 'Owner unavailable');
+    const streak = stStreak_(row);
+    const cut = index === model.playoffTeams ? `<tr class="st-u-cut"><td colspan="10"><span>Playoff cutline · Top ${model.playoffTeams} qualify</span></td></tr>` : '';
+    return `${cut}<tr class="st-u-row ${cls} ${row.defendingChampion ? 'is-champ' : ''} ${id === myTeam ? 'is-mine' : ''}" data-team-id="${id}">
+      <td class="st-u-rank" data-label="Rank"><span title="${seedType}: ${rank}">${rank}</span></td>
+      <td class="st-u-team"><div class="st-u-team-inner">${awardsLogoHtml_(team, 'st-logo')}<div class="st-u-team-copy"><button type="button" class="st-teambtn" data-st-odds-team="${id}">${name}</button><small>${escapeHtml(teamSubtext)}${id === myTeam ? ' · ★ YOU' : ''}</small></div></div></td>
+      <td class="st-u-rec" data-label="W-L-T">${stRecord_(row)}</td>
+      <td class="st-u-pf" data-label="PF">${number2(Number(row.pointsFor || 0))}</td>
+      <td class="st-u-pa" data-label="PA">${number2(Number(row.pointsAgainst || 0))}</td>
+      <td class="st-u-div" data-label="DIV">${stSplitRecord_(row, 'division')}</td>
+      <td class="st-u-home" data-label="HOME">${stSplitRecord_(row, 'home')}</td>
+      <td class="st-u-away" data-label="AWAY">${stSplitRecord_(row, 'away')}</td>
+      <td class="st-u-strk" data-label="STRK">${escapeHtml(streak.type ? String(row.streak) : '—')}</td>
+      <td class="st-u-chance" data-label="Make playoffs"><div class="st-u-chance-top"><strong>${escapeHtml(pct)}</strong><span class="st-u-chance-label">${valid ? 'Estimated' : 'Awaiting model'}</span></div><div class="st-odds-track" aria-hidden="true"><i style="width:${valid ? Math.max(0, Math.min(100, raw)).toFixed(2) : 0}%"></i></div></td>
+    </tr>`;
   }).join('');
-  return `${header}<div class="st-odds-list">${items}</div><p class="st-odds-disclaimer">${result.remaining ? `Estimates through Week ${model.through}, using ESPN's remaining matchups, current W-L records and points per game. 30-point weekly scoring variation; division leaders are seeded first. Does not account for injuries, trades, live partial-game scores or ESPN-specific tiebreakers.` : 'Final regular-season qualification, based on the projected field and available standings.'} Not official ESPN probabilities.</p>`;
+  const notice = result ? (result.remaining
+    ? `${result.trials.toLocaleString()} simulations through Week ${model.through}, using remaining ESPN matchups, current records and points per game. Assumes 30-point weekly scoring variation; does not account for injuries, trades or all ESPN tiebreakers.`
+    : 'Regular season complete. Percentages reflect the projected playoff field from available standings, not an official ESPN bracket.')
+    : status;
+  const retry = stOddsState_.error ? ' <button type="button" data-st-odds-retry="1">Retry simulation</button>' : '';
+  return `${header}<div class="st-u-scroll"><table class="st-unified-table"><caption class="st-sr">Season standings and estimated chance of making the playoffs</caption><thead><tr><th scope="col">RK</th><th scope="col">TEAM</th><th scope="col">W-L-T</th><th scope="col">PF</th><th scope="col">PA</th><th scope="col">DIV</th><th scope="col">HOME</th><th scope="col">AWAY</th><th scope="col">STRK</th><th scope="col">MAKE PLAYOFFS %</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="st-u-foot"><span><strong>ESPN data:</strong> Season records, PF, PA, and streak. ${splitsMissing ? 'A dash (—) means the API did not provide that split.' : ''}</span><span><strong>MODEL ESTIMATE:</strong> ${notice}${retry}</span></div>`;
 }
-
 function stOddsRender_(model) {
   const box = document.getElementById('stOdds');
   if (!box || !model) return;
@@ -8226,7 +8285,8 @@ function renderStandings() {
   }
   if (cur.through > 0) state.standingsInitialised = true;
 
-  grid.innerHTML = ST_CONF.map(conf => stConfCardHtml_(model, conf)).join('');
+  // The unified season table is rendered inside the existing stOdds section.
+  // Do not render the old AFC/NFC cards here: they would duplicate the same standings.
   renderStandingsTimeline_(model);
   renderStandingsLegend_(model);
   stOddsRender_(model);

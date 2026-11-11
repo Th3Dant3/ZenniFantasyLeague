@@ -9276,3 +9276,88 @@ tr.is-mine .standing-name strong { color: var(--gold-2); }
   [data-view="standings"] .st-odds-row { padding:10px; gap:10px; }
   [data-view="standings"] .st-odds-value { flex-basis:66px; font-size:23px; }
 }
+
+
+/* =========================================================
+   UNIFIED SEASON STATS + PLAYOFF CHANCES · PC / PHONE
+   Scoped to Standings; existing playoff bracket is untouched.
+   ========================================================= */
+[data-view="standings"] .st-unified-wrap { display:block; margin-top:14px; }
+[data-view="standings"] .st-unified { margin:0; padding:20px; overflow:hidden; }
+[data-view="standings"] .st-unified-heading { margin-bottom:16px; }
+[data-view="standings"] .st-unified-heading h3 { font-size:32px; }
+[data-view="standings"] .st-u-scroll { width:100%; overflow-x:auto; scrollbar-width:thin; scrollbar-color:#53667f transparent; }
+[data-view="standings"] .st-unified-table { width:100%; min-width:1050px; border-collapse:separate; border-spacing:0; font-size:13px; color:#f2f6fb; font-variant-numeric:tabular-nums; }
+[data-view="standings"] .st-unified-table th { padding:12px 10px; border-bottom:1px solid #38516b; background:#0b1a2b; color:#d1dce9; font-size:11px; letter-spacing:.05em; text-align:right; white-space:nowrap; }
+[data-view="standings"] .st-unified-table th:first-child, [data-view="standings"] .st-unified-table th:nth-child(2) { text-align:left; }
+[data-view="standings"] .st-unified-table th:last-child { color:#ffd36d; }
+[data-view="standings"] .st-u-row { background:rgba(10,26,43,.55); }
+[data-view="standings"] .st-u-row:nth-child(even) { background:rgba(29,48,71,.42); }
+[data-view="standings"] .st-u-row:hover, [data-view="standings"] .st-u-row:focus-within { background:rgba(245,183,40,.10); }
+[data-view="standings"] .st-u-row.is-mine { box-shadow:inset 3px 0 #55b8ff; }
+[data-view="standings"] .st-u-row.is-champ { background:linear-gradient(90deg,rgba(245,183,40,.13),rgba(10,26,43,.5)); }
+[data-view="standings"] .st-unified-table td { padding:9px 10px; border-bottom:1px solid #223850; text-align:right; white-space:nowrap; }
+[data-view="standings"] .st-u-rank { width:46px; text-align:left !important; }
+[data-view="standings"] .st-u-rank span { display:inline-grid; place-items:center; min-width:28px; height:28px; padding:0 5px; border-radius:8px; background:#203750; font-weight:900; }
+[data-view="standings"] .st-u-row:first-child .st-u-rank span { color:#071322; background:linear-gradient(135deg,#ffe18a,#f5b728); }
+[data-view="standings"] .st-u-team { min-width:220px; text-align:left !important; }
+[data-view="standings"] .st-u-team-inner { display:flex; align-items:center; gap:10px; }
+[data-view="standings"] .st-u-team .st-logo { --s:35px; }
+[data-view="standings"] .st-u-team-copy { min-width:0; }
+[data-view="standings"] .st-u-team-copy .st-teambtn { font-size:13px; }
+[data-view="standings"] .st-u-team-copy small { display:block; color:#90a8c2; font-size:10px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+[data-view="standings"] .st-u-rec, [data-view="standings"] .st-u-pf { font-weight:800; }
+[data-view="standings"] .st-u-pf { color:#ffe08a; background:rgba(44,125,177,.10); }
+[data-view="standings"] .st-u-pa, [data-view="standings"] .st-u-div, [data-view="standings"] .st-u-home, [data-view="standings"] .st-u-away { color:#b4c5d8; }
+[data-view="standings"] .st-u-strk { font-weight:800; }
+[data-view="standings"] .st-u-chance { width:235px; min-width:180px; }
+[data-view="standings"] .st-u-chance-top { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:7px; }
+[data-view="standings"] .st-u-chance strong { font:900 20px/1 'Barlow Condensed',sans-serif; color:#ff9ca7; }
+[data-view="standings"] .st-u-row.is-mid .st-u-chance strong { color:#ffd978; }
+[data-view="standings"] .st-u-row.is-high .st-u-chance strong { color:#75e5a1; }
+[data-view="standings"] .st-u-chance-label { color:#8ea5bc; font-size:10px; }
+[data-view="standings"] .st-u-row.is-pending .st-u-chance strong { color:#a9b9ca; }
+[data-view="standings"] .st-u-row.is-mid .st-odds-track i { background:#f5b728; }
+[data-view="standings"] .st-u-row.is-high .st-odds-track i { background:#4bd384; }
+[data-view="standings"] .st-u-cut td { padding:9px 12px; color:#ffd36d; background:rgba(245,183,40,.08); border-top:2px dashed #c79523; border-bottom:1px solid #a17c29; text-align:center; font-size:11px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
+[data-view="standings"] .st-u-foot { display:flex; justify-content:space-between; gap:12px 28px; flex-wrap:wrap; margin-top:14px; color:#9eb1c8; font-size:11px; line-height:1.5; }
+[data-view="standings"] .st-u-foot span { flex:1 1 280px; }
+[data-view="standings"] .st-u-foot strong { color:#ffd36d; }
+[data-view="standings"] .st-u-foot button { background:#122b42; color:#ffda80; border:1px solid #a8842c; border-radius:7px; padding:5px 8px; cursor:pointer; }
+[data-view="standings"] .st-u-team .st-teambtn:focus-visible, [data-view="standings"] .st-u-foot button:focus-visible { outline:2px solid #ffe088; outline-offset:3px; }
+@media(max-width:760px) {
+  [data-view="standings"] .st-unified { padding:12px 10px; }
+  [data-view="standings"] .st-unified-heading { align-items:flex-start; gap:10px; }
+  [data-view="standings"] .st-unified-heading h3 { font-size:26px; }
+  [data-view="standings"] .st-unified-heading .st-odds-method { max-width:94px; white-space:normal; text-align:center; }
+  [data-view="standings"] .st-u-scroll { overflow:visible; }
+  [data-view="standings"] .st-unified-table, [data-view="standings"] .st-unified-table tbody { display:block; min-width:0; width:100%; }
+  [data-view="standings"] .st-unified-table thead { display:none; }
+  [data-view="standings"] .st-u-row { display:grid; grid-template-columns:32px minmax(0,1fr) 96px; gap:9px 10px; align-items:center; margin-bottom:8px; padding:11px 10px; border:1px solid #2a405b; border-radius:12px; }
+  [data-view="standings"] .st-unified-table td { display:block; padding:0; border:0; min-width:0; white-space:normal; }
+  [data-view="standings"] .st-u-rank { grid-column:1; grid-row:1; }
+  [data-view="standings"] .st-u-rank span { min-width:28px; height:28px; }
+  [data-view="standings"] .st-u-team { grid-column:2; grid-row:1; min-width:0; }
+  [data-view="standings"] .st-u-team .st-logo { --s:32px; }
+  [data-view="standings"] .st-u-team-inner { gap:8px; }
+  [data-view="standings"] .st-u-team-copy .st-teambtn { font-size:12px; line-height:1.25; white-space:normal; overflow-wrap:anywhere; }
+  [data-view="standings"] .st-u-team-copy small { font-size:10px; }
+  [data-view="standings"] .st-u-chance { grid-column:3; grid-row:1; min-width:0; width:auto; align-self:center; }
+  [data-view="standings"] .st-u-chance-top { display:block; text-align:right; }
+  [data-view="standings"] .st-u-chance strong { font-size:23px; }
+  [data-view="standings"] .st-u-chance-label { display:block; font-size:9px; }
+  [data-view="standings"] .st-u-rec { grid-column:2; grid-row:2; text-align:left !important; font-size:12px; }
+  [data-view="standings"] .st-u-rec::before { content:'W-L-T'; display:inline-block; margin-right:6px; color:#8ea5bc; font-size:9px; }
+  [data-view="standings"] .st-u-pf { grid-column:1 / 3; grid-row:3; text-align:left !important; background:transparent; }
+  [data-view="standings"] .st-u-pa { grid-column:3; grid-row:3; text-align:right; }
+  [data-view="standings"] .st-u-div { grid-column:1; grid-row:4; }
+  [data-view="standings"] .st-u-home { grid-column:2; grid-row:4; }
+  [data-view="standings"] .st-u-away { grid-column:3; grid-row:4; }
+  [data-view="standings"] .st-u-strk { grid-column:3; grid-row:2; text-align:right; }
+  [data-view="standings"] .st-u-pf::before, [data-view="standings"] .st-u-pa::before, [data-view="standings"] .st-u-div::before, [data-view="standings"] .st-u-home::before, [data-view="standings"] .st-u-away::before, [data-view="standings"] .st-u-strk::before { content:attr(data-label) '  '; color:#8ea5bc; font-size:9px; font-weight:700; }
+  [data-view="standings"] .st-u-div, [data-view="standings"] .st-u-home, [data-view="standings"] .st-u-away { border-top:1px solid #263d56; padding-top:7px; font-size:11px; text-align:left; }
+  [data-view="standings"] .st-u-away { text-align:right; }
+  [data-view="standings"] .st-u-cut { display:block; margin:8px 0 12px; }
+  [data-view="standings"] .st-u-cut td { display:block; padding:9px 4px; }
+  [data-view="standings"] .st-u-foot { font-size:10px; }
+}
